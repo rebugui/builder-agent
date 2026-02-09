@@ -62,22 +62,64 @@ class SelfCorrectionTester:
             error_message = None
 
             if not passed:
+                # 에러 타입 감지
                 if 'SyntaxError' in result.stderr: error_type = 'SyntaxError'
                 elif 'IndentationError' in result.stderr: error_type = 'IndentationError'
                 elif 'ModuleNotFoundError' in result.stderr: error_type = 'ModuleNotFoundError'
                 elif 'AttributeError' in result.stderr: error_type = 'AttributeError'
                 elif 'NameError' in result.stderr: error_type = 'NameError'
                 elif 'AssertionError' in result.stderr: error_type = 'AssertionError'
+                elif 'ImportError' in result.stderr: error_type = 'ImportError'
+                elif 'TypeError' in result.stderr: error_type = 'TypeError'
+                elif 'ValueError' in result.stderr: error_type = 'ValueError'
                 elif 'Exception' in result.stderr: error_type = 'Exception'
 
+                # 개선된 에러 메시지 추출
                 stderr_lines = result.stderr.split('\n')
-                for line in stderr_lines:
-                    if 'Error:' in line or 'ERROR ' in line:
-                        error_message = line.strip()
+                stdout_lines = result.stdout.split('\n')
+
+                # stderr와 stdout 모두 검사
+                all_lines = stderr_lines + stdout_lines
+
+                # 에러 라인 찾기 (컨텍스트 포함)
+                for i, line in enumerate(all_lines):
+                    stripped = line.strip()
+                    # 다양한 에러 패턴 매칭
+                    if any(pattern in stripped for pattern in [
+                        'Error:', 'ERROR ', 'FAILED', 'Error ', 'error:',
+                        'AssertionError:', 'Traceback', 'Exception in'
+                    ]):
+                        # 컨텍스트 포함 (이전 2줄, 이후 2줄)
+                        context_start = max(0, i - 2)
+                        context_end = min(len(all_lines), i + 3)
+                        context = all_lines[context_start:context_end]
+                        error_message = '\n'.join(context).strip()
                         break
 
-                if not error_message and result.stderr:
-                    error_message = result.stderr.strip()[:200]
+                # 여전히 못 찾았으면 stdout에서 FAILED 라인 찾기
+                if not error_message:
+                    for i, line in enumerate(stdout_lines):
+                        if 'FAILED' in line or 'failed' in line:
+                            context_start = max(0, i - 1)
+                            context_end = min(len(stdout_lines), i + 2)
+                            context = stdout_lines[context_start:context_end]
+                            error_message = '\n'.join(context).strip()
+                            break
+
+                # 최후의 수단: stdout/stderr 앞부분 사용
+                if not error_message:
+                    if result.stdout:
+                        error_message = result.stdout.strip()[:500]
+                    elif result.stderr:
+                        error_message = result.stderr.strip()[:500]
+                    else:
+                        error_message = "Test failed with no output"
+
+                # 디버그 로그에 전체 출력 기록
+                logger.debug(f"=== Test Output (DEBUG) ===")
+                logger.debug(f"STDOUT:\n{result.stdout}")
+                logger.debug(f"STDERR:\n{result.stderr}")
+                logger.debug(f"=== End Debug Output ===")
 
             return TestResult(
                 passed=passed,
@@ -195,17 +237,70 @@ import sys
         )
         return fixed_code
 
+    def _parse_with_delimiters(self, code: str, project_name: str) -> Dict[str, str]:
+        """커스텀 딜리미터 방식 파싱 (@@@START_FILE:@@@)"""
+        pattern = r"@@@START_FILE:\s*(.*?)\s*@@@\n(.*?)\n@@@END_FILE@@@"
+        matches = list(re.finditer(pattern, code, re.DOTALL))
+
+        if matches:
+            files = {}
+            for match in matches:
+                filepath = match.group(1).strip()
+                content = match.group(2)
+                files[filepath] = content
+            return files
+        return {}
+
+    def _parse_with_code_blocks(self, code: str, project_name: str) -> Dict[str, str]:
+        """코드 블록 방식 파싱 (```python``` 등)"""
+        files = {}
+        pattern = r"```(?:python|py)?\n*(.*?)```"
+
+        matches = re.finditer(pattern, code, re.DOTALL)
+        for match in matches:
+            content = match.group(1).strip()
+            if content and not content.startswith("@@@"):  # 딜리미터가 아닌 경우
+                # 기본 파일 경로 추정
+                files['src/main.py'] = content
+                break
+
+        return files
+
+    def _parse_raw_text(self, code: str, project_name: str) -> Dict[str, str]:
+        """원본 텍스트 파싱 (딜리미터/코드블록이 없는 경우)"""
+        # 딜리미터나 코드 블록이 없으면 전체를 코드로 간주
+        if "@@@START_FILE" not in code and "```" not in code:
+            lines = code.split('\n')
+            # 불필요한 서술 제거
+            code_lines = []
+            for line in lines:
+                stripped = line.strip()
+                # 일반적인 코드 시작 패턴
+                if stripped and not stripped.startswith(('Here', 'The', 'This', 'Fixed', 'Corrected')):
+                    code_lines.append(line)
+            if code_lines:
+                return {'src/main.py': '\n'.join(code_lines)}
+        return {}
+
+    def _validate_syntax(self, code: str) -> bool:
+        """파이썬 구문 검증"""
+        try:
+            compile(code, '<string>', 'exec')
+            return True
+        except SyntaxError:
+            return False
+
     def fix_error(self, project_dir: str, test_result: TestResult, project_name: str) -> bool:
-        """에러 수정"""
+        """에러 수정 (다중 파싱 전략)"""
         error_file = 'src/main.py'
-        
+
         # Try to infer filename from error message
         match = re.search(r"in ([\w\.]+):", test_result.error_message or "")
         if match:
             error_file = f"src/{match.group(1)}"
-        
+
         error_file_path = Path(project_dir) / error_file
-        
+
         # If inferred file doesn't exist, try finding *any* python file in src/
         if not error_file_path.exists():
              src_files = list((Path(project_dir) / 'src').glob('*.py'))
@@ -225,48 +320,52 @@ import sys
 
         try:
             fixed_code_raw = self.analyze_error_with_llm(error_message, source_code, project_name)
-            
-            # Parse fixed code using new regex parser
-            parsed_files = self.coder.parse_generated_code(fixed_code_raw, project_name)
-            
-            # If parse returns files, use the one matching error_file or fallback
+
+            # 다중 파싱 전략 시도
+            parsers = [
+                ("Custom Delimiters", lambda: self._parse_with_delimiters(fixed_code_raw, project_name)),
+                ("Code Blocks", lambda: self._parse_with_code_blocks(fixed_code_raw, project_name)),
+                ("Raw Text", lambda: self._parse_raw_text(fixed_code_raw, project_name)),
+            ]
+
             new_content = None
-            if error_file in parsed_files:
-                new_content = parsed_files[error_file]
-            elif f"src/{error_file_path.name}" in parsed_files:
-                new_content = parsed_files[f"src/{error_file_path.name}"]
-            elif len(parsed_files) == 1:
-                new_content = list(parsed_files.values())[0]
-            
-            # Fallback for legacy format if regex fails (though unlikely with prompt)
-            if not new_content and not parsed_files:
-                lines = fixed_code_raw.split('\n')
-                code_lines = []
-                in_block = False
-                for line in lines:
-                    if line.strip().startswith('```'):
-                        in_block = not in_block
-                        continue
-                    if in_block:
-                        code_lines.append(line)
-                if code_lines:
-                     new_content = '\n'.join(code_lines)
-                else:
-                     # Just assume raw text if no blocks
-                     if "@@@START_FILE" not in fixed_code_raw:
-                         new_content = fixed_code_raw
+            parsed_files = {}
+
+            for parser_name, parser_func in parsers:
+                try:
+                    parsed_files = parser_func()
+                    if parsed_files:
+                        # 파일 찾기
+                        if error_file in parsed_files:
+                            new_content = parsed_files[error_file]
+                        elif f"src/{error_file_path.name}" in parsed_files:
+                            new_content = parsed_files[f"src/{error_file_path.name}"]
+                        elif len(parsed_files) == 1:
+                            new_content = list(parsed_files.values())[0]
+
+                        # 구문 검증
+                        if new_content and self._validate_syntax(new_content):
+                            logger.info(f"✅ Successfully parsed using {parser_name} strategy")
+                            break
+                        else:
+                            logger.debug(f"⚠️ {parser_name} parsing failed syntax validation")
+                            new_content = None
+                except Exception as e:
+                    logger.debug(f"⚠️ {parser_name} parser failed: {e}")
+                    continue
 
             if new_content:
                 with open(error_file_path, 'w', encoding='utf-8') as f:
                     f.write(new_content)
-                logger.info(f"Fixed error in {error_file}")
+                logger.info(f"✅ Fixed error in {error_file}")
                 return True
             else:
-                 logger.error("Failed to parse fixed code.")
+                 logger.error("❌ All parsing strategies failed. LLM output:")
+                 logger.error(f"First 500 chars: {fixed_code_raw[:500]}")
                  return False
 
         except Exception as e:
-            logger.error(f"Error fixing code: {str(e)}")
+            logger.error(f"❌ Error fixing code: {str(e)}")
             return False
 
     def test_and_fix(self, project_dir: str, project_name: str, max_retries: int = None) -> Tuple[bool, TestResult, int]:

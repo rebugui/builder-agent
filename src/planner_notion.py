@@ -34,8 +34,14 @@ class NotionPlanner:
 
     def __init__(self, api_key: str = None, database_id: str = None):
         """초기화"""
-        # 환경 변수 로드
+        # 환경 변수 로드 - OPENCLAW_ROOT 지원
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+        # 환경 변수로 지정된 PROJECT_ROOT 사용 (우선)
+        env_root = os.getenv("OPENCLAW_ROOT")
+        if env_root:
+            project_root = env_root
+
         env_path = os.path.join(project_root, '.env')
 
         if os.path.exists(env_path):
@@ -70,6 +76,40 @@ class NotionPlanner:
             "Content-Type": "application/json",
             "Notion-Version": "2022-06-28"
         }
+
+        # 캐싱: 유효한 상태값 목록
+        self._valid_statuses = None
+
+    def _get_valid_statuses(self) -> List[str]:
+        """Notion DB에서 유효한 상태값 목록 조회"""
+        if self._valid_statuses is not None:
+            return self._valid_statuses
+
+        try:
+            response = requests.get(
+                f"{self.base_url}/databases/{self.database_id}",
+                headers=self.headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            db_info = response.json()
+
+            for prop_name, prop_data in db_info['properties'].items():
+                if prop_data.get('type') == 'status':
+                    self._valid_statuses = [
+                        option['name']
+                        for option in prop_data['status']['options']
+                    ]
+                    break
+
+            if self._valid_statuses is None:
+                # fallback
+                self._valid_statuses = ['백로그', 'In Progress', '초안 작성중', '검토중', 'Failed', '게시 완료']
+        except Exception as e:
+            print(f"⚠️ 상태값 조회 실패, 기본값 사용: {e}")
+            self._valid_statuses = ['백로그', 'In Progress', '초안 작성중', '검토중', 'Failed', '게시 완료']
+
+        return self._valid_statuses
 
     def _make_request(self, method: str, url: str, data: Dict = None) -> Dict:
         """Notion API 요청"""
@@ -163,13 +203,13 @@ class NotionPlanner:
             return []
 
     def select_topic(self, keywords: List[str] = None) -> Optional[NotionProject]:
-        """최적의 주제 선택"""
+        """최적의 주제 선택 (다차원 점수화 시스템)"""
         projects = self.get_incomplete_projects()
         if not projects:
             print("⚠️  미완료 프로젝트가 없습니다.")
             return None
 
-        # 키워드 필터링 로직 (기존과 동일)
+        # 키워드 필터링
         if keywords:
             keywords_lower = [kw.lower() for kw in keywords]
             filtered = []
@@ -180,18 +220,77 @@ class NotionPlanner:
                         break
             if filtered:
                 projects = filtered
+                print(f"🔍 키워드 필터링: {len(projects)}개 프로젝트")
 
-        # 점수 계산 (기존과 동일)
-        # (score_project 메서드가 클래스 내부에 없어서 self.score_project 필요하거나 로직 통합)
-        # 여기서는 간단히 설명 길이로만 우선순위
-        projects.sort(key=lambda x: len(x.description), reverse=True)
-        
-        selected = projects[0]
-        print(f"\n📋 선택된 프로젝트: {selected.name}")
+        # 다차원 점수화
+        scored_projects = []
+        current_time = datetime.now()
+
+        for p in projects:
+            score = 0
+            score_details = []
+
+            # 1. 설명 상세함 (+10점)
+            desc_score = min(len(p.description) / 50, 10)
+            score += desc_score
+            score_details.append(f"설명상세함: +{desc_score:.1f}")
+
+            # 2. 대기 시간 가중치 (+20점)
+            try:
+                created_time = datetime.fromisoformat(p.created_at.replace('Z', '+00:00'))
+                days_waiting = (current_time - created_time.replace(tzinfo=None)).days
+                waiting_score = min(days_waiting, 20)
+                score += waiting_score
+                score_details.append(f"대기시간({days_waiting}일): +{waiting_score}")
+            except Exception as e:
+                score_details.append(f"대기시간: N/A")
+
+            # 3. 키워드 매칭 (+30점) - 키워드가 제공된 경우
+            if keywords:
+                keywords_lower = [kw.lower() for kw in keywords]
+                keyword_matches = sum(
+                    1 for kw in keywords_lower
+                    if kw in p.name.lower() or kw in p.description.lower()
+                )
+                keyword_score = min(keyword_matches * 10, 30)
+                score += keyword_score
+                score_details.append(f"키워드매칭: +{keyword_score}")
+
+            # 4. 이름 길이 적정성 (+5점) - 너무 길거나 짧은 이름 패널티
+            name_length = len(p.name)
+            if 10 <= name_length <= 50:
+                score += 5
+                score_details.append("이름길이적정: +5")
+            else:
+                score_details.append(f"이름길이({name_length}): 0")
+
+            scored_projects.append((score, p, score_details))
+
+        # 점수순 정렬
+        scored_projects.sort(key=lambda x: x[0], reverse=True)
+
+        # 상위 3개 출력
+        print(f"\n📊 프로젝트 점수 순위:")
+        for i, (score, p, details) in enumerate(scored_projects[:3], 1):
+            print(f"  {i}. {p.name} (총점: {score:.1f})")
+            for detail in details:
+                print(f"     - {detail}")
+
+        selected = scored_projects[0][1]
+        print(f"\n📋 최종 선택된 프로젝트: {selected.name}")
         return selected
 
     def update_project_status(self, page_id: str, status: str) -> bool:
         """상태 업데이트"""
+        # 유효한 상태값 확인
+        valid_statuses = self._get_valid_statuses()
+
+        if status not in valid_statuses:
+            print(f"⚠️ Warning: '{status}' is not a valid status.")
+            print(f"   Valid statuses: {', '.join(valid_statuses)}")
+            print(f"   Using '검토중' instead.")
+            status = '검토중'
+
         url = f"{self.base_url}/pages/{page_id}"
         try:
             self._make_request("PATCH", url, data={
@@ -199,7 +298,8 @@ class NotionPlanner:
             })
             print(f"✅ 상태 업데이트: {status}")
             return True
-        except Exception:
+        except Exception as e:
+            print(f"❌ 상태 업데이트 실패: {e}")
             return False
 
     def update_project_url(self, page_id: str, deployed_url: str) -> bool:
@@ -250,8 +350,16 @@ class NotionPlanner:
             print(f"❌ 스펙 문서 추가 실패: {e}")
 
     # add_project, list_projects 등 기존 메서드 유지
-    def add_project(self, name: str, description: str, status: str = '초안 작성중') -> str:
-        # 기존 구현과 동일하게
+    def add_project(self, name: str, description: str, status: str = '백로그') -> str:
+        # 유효한 상태값 확인
+        valid_statuses = self._get_valid_statuses()
+
+        if status not in valid_statuses:
+            print(f"⚠️ Warning: '{status}' is not a valid status.")
+            print(f"   Valid statuses: {', '.join(valid_statuses)}")
+            print(f"   Using '백로그' instead.")
+            status = '백로그'
+
         url = f"{self.base_url}/pages"
         request_data = {
             "parent": {"database_id": self.database_id},

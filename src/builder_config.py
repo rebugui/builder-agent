@@ -3,9 +3,16 @@ from pathlib import Path
 
 def load_env_file():
     """Load environment variables from .env file"""
-    # Find the project root (assuming this file is in modules/builder/)
-    current_file = Path(__file__).resolve()
-    project_root = current_file.parents[2]  # Adjust based on depth
+    # 환경 변수로 지정된 PROJECT_ROOT 사용 (우선)
+    # 또는 절대 경로로 직접 설정
+    project_root = Path(os.getenv("OPENCLAW_ROOT", "/Users/nabang/Documents/OpenClaw"))
+
+    # PROJECT_ROOT가 존재하는지 확인
+    if not project_root.exists():
+        # fallback: 상대 경로 계산
+        current_file = Path(__file__).resolve()
+        project_root = current_file.parents[2]  # Adjust based on depth
+
     env_path = project_root / '.env'
 
     if env_path.exists():
@@ -35,7 +42,7 @@ class Config:
 
     # Paths
     MODULE_ROOT = Path(__file__).parent.resolve()
-    PROJECT_ROOT = MODULE_ROOT.parents[1]
+    PROJECT_ROOT = Path(os.getenv("OPENCLAW_ROOT", MODULE_ROOT.parents[1]))
     PROJECTS_DIR = MODULE_ROOT / 'projects'
     DATABASE_PATH = MODULE_ROOT / 'database' / 'history.db'
 

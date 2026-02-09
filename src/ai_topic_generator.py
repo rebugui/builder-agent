@@ -14,7 +14,8 @@ from typing import Dict, List
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(project_root)
 
-from modules.intelligence.writer import GLMClient
+# Builder Agent 자체 LLM 클라이언트 사용
+from modules.builder.llm_client import GLMClient
 
 
 class AITopicGenerator:

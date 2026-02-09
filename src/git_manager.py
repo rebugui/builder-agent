@@ -3,6 +3,8 @@
 Builder Agent - Git Manager (GitHub API 통합)
 
 GitHub API를 사용하여 저장소를 생성하고 코드를 push합니다.
+모든 프로젝트는 OpenClaw 메인 리포지토리의 서브모듈로 관리됩니다.
+라이선스: AGPL-3.0
 """
 
 import os
@@ -16,7 +18,7 @@ from pathlib import Path
 
 # Add project root to sys.path
 current_dir = Path(__file__).resolve().parent
-project_root = current_dir.parents[1]
+project_root = Path(os.getenv("OPENCLAW_ROOT", current_dir.parents[1]))
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
@@ -24,6 +26,30 @@ from modules.builder.builder_config import config
 from modules.builder.utils.logger import setup_logger
 
 logger = setup_logger("GitManager")
+
+# AGPL-3.0 라이선스 텍스트
+AGPL_3_0_LICENSE = """GNU AFFERO GENERAL PUBLIC LICENSE
+Version 3, 19 November 2007
+
+Copyright (C) 2024 OpenClaw Project
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+Additional permission under GNU AGPL version 3 section 7:
+If you modify this program, or any covered work, by linking or combining
+it with other code, the resulting work must be licensed under AGPL-3.0.
+"""
 
 try:
     from github import Github
@@ -43,6 +69,7 @@ class RepoInfo:
     clone_url: str
     description: str
     created: bool
+    submodule_path: Optional[str] = None  # 서브모듈 경로 (메인 리포지토리 내부)
 
 
 class GitManager:
@@ -211,6 +238,128 @@ class GitManager:
         except Exception as e:
             logger.error(f"Failed to delete repository: {str(e)}")
             return False
+
+    def add_agpl_license(self, project_dir: str) -> bool:
+        """프로젝트에 AGPL-3.0 라이선스 파일 추가"""
+        logger.info("Adding AGPL-3.0 license...")
+
+        try:
+            license_path = Path(project_dir) / 'LICENSE'
+            with open(license_path, 'w', encoding='utf-8') as f:
+                f.write(AGPL_3_0_LICENSE)
+
+            logger.info(f"✅ AGPL-3.0 license added to {project_dir}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add license: {str(e)}")
+            return False
+
+    def add_submodule_to_main(
+        self,
+        submodule_url: str,
+        submodule_path: str,
+        main_repo_path: Optional[str] = None
+    ) -> bool:
+        """
+        OpenClow 메인 리포지토리에 서브모듈 추가
+
+        Args:
+            submodule_url: 서브모듈 GitHub URL
+            submodule_path: 메인 리포지토리 내부의 경로 (예: modules/builder/projects/project-name)
+            main_repo_path: 메인 리포지토리 경로 (기본값: OPENCLAW_ROOT)
+        """
+        if main_repo_path is None:
+            main_repo_path = str(project_root)
+
+        logger.info(f"Adding submodule to main repository: {submodule_path}")
+
+        try:
+            # 메인 리포지토리에 서브모듈 추가
+            subprocess.run(
+                ['git', 'submodule', 'add', submodule_url, submodule_path],
+                cwd=main_repo_path,
+                capture_output=True,
+                check=True
+            )
+
+            logger.info(f"✅ Submodule added: {submodule_path}")
+            return True
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to add submodule: {e.stderr.decode('utf-8')}")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to add submodule: {str(e)}")
+            return False
+
+    def create_as_submodule(
+        self,
+        project_dir: str,
+        repo_name: str,
+        description: str = "",
+        main_repo_projects_dir: str = "modules/builder/projects"
+    ) -> RepoInfo:
+        """
+        프로젝트를 생성하고 OpenClow 메인 리포지토리의 서브모듈로 추가
+
+        Args:
+            project_dir: 로컬 프로젝트 경로
+            repo_name: 저장소 이름
+            description: 저장소 설명
+            main_repo_projects_dir: 메인 리포지토리 내 프로젝트 디렉토리 경로
+
+        Returns:
+            RepoInfo: 생성된 저장소 정보
+        """
+        logger.info(f"Creating project as submodule: {repo_name}")
+
+        # 1. GitHub 저장소 생성
+        repo_info = self.create_repo(
+            repo_name=repo_name,
+            description=description,
+            private=False,
+            auto_init=False
+        )
+
+        if not repo_info.created:
+            logger.error("Failed to create GitHub repository")
+            return repo_info
+
+        # 2. AGPL-3.0 라이선스 추가
+        self.add_agpl_license(project_dir)
+
+        # 3. GitHub에 코드 push
+        push_success = self.push_code(
+            project_dir=project_dir,
+            repo_url=repo_info.clone_url,
+            commit_message=f"Initial commit: {repo_name}\n\nLicensed under AGPL-3.0"
+        )
+
+        if not push_success:
+            logger.error("Failed to push code to GitHub")
+            return repo_info
+
+        # 4. 메인 리포지토리에 서브모듈로 추가
+        # OPENCLAW_ROOT 환경 변수를 사용하여 경로 표준화
+        main_repo_path = Path(os.getenv("OPENCLAW_ROOT", project_root))
+        submodule_path = f"{main_repo_projects_dir}/{repo_name}"
+
+        logger.info(f"Adding submodule to main repo at: {main_repo_path}")
+        logger.info(f"Submodule path: {submodule_path}")
+
+        submodule_success = self.add_submodule_to_main(
+            submodule_url=repo_info.clone_url,
+            submodule_path=submodule_path,
+            main_repo_path=str(main_repo_path)
+        )
+
+        if submodule_success:
+            repo_info.submodule_path = submodule_path
+            logger.info(f"✅ Project created as submodule: {submodule_path}")
+        else:
+            logger.warning(f"Repository created but submodule addition failed")
+
+        return repo_info
 
 if __name__ == "__main__":
     pass
