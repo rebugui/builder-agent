@@ -43,7 +43,7 @@ class SelfCorrectionTester:
     def __init__(self, coder: CodeGenerator = None):
         """초기화"""
         self.coder = coder if coder else CodeGenerator()
-        self.max_retries = 3
+        self.max_retries = 10  # 자가수정 최대 10회
         self.timeout = 30
 
     def run_unit_tests(self, project_dir: str) -> TestResult:

@@ -174,12 +174,11 @@ STDERR (last 500 chars):
                         return None
                     continue  # 재시도
 
-                # 3. Self-Correction Loop
+                # 3. Self-Correction Loop (최대 10회)
                 logger.info("Step 3: Self-Correction Loop")
                 success, test_result, attempt = self.tester.test_and_fix(
                     project_dir=project_dir,
-                    project_name=project_name,
-                    max_retries=3
+                    project_name=project_name
                 )
 
                 if not success:
