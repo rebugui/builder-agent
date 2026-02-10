@@ -31,14 +31,18 @@ def load_env_file():
 load_env_file()
 
 class Config:
-    # GLM Settings
-    GLM_API_KEY = os.getenv("GLM_API_KEY", "")
-    GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4/")
-    GLM_MODEL = os.getenv("GLM_MODEL", "glm-4.7")
+    # GLM Settings (Builder Agent)
+    GLM_API_KEY = os.getenv("BUILDER_LLM_API_KEY", "")
+    GLM_BASE_URL = os.getenv("BUILDER_LLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4/")
+    GLM_MODEL = os.getenv("BUILDER_LLM_MODEL", "glm-4.7")
     GLM_TIMEOUT = 120
 
+    # Notion Settings (Builder Agent)
+    NOTION_TOKEN = os.getenv("BUILDER_NOTION_TOKEN", "")
+    NOTION_DATABASE_ID = os.getenv("BUILDER_DATABASE_ID", "")
+
     # GitHub Settings
-    GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+    GITHUB_TOKEN = os.getenv("BUILDER_GITHUB_TOKEN", "")
 
     # Paths
     MODULE_ROOT = Path(__file__).parent.resolve()

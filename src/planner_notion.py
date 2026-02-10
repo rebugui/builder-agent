@@ -57,16 +57,16 @@ class NotionPlanner:
 
         # Notion API 설정
         if api_key is None:
-            api_key = os.getenv("NOTION_API_KEY", "")
+            api_key = os.getenv("BUILDER_NOTION_TOKEN", "")
 
         if database_id is None:
-            database_id = os.getenv("PROJECT_DATABASE_ID", "")
+            database_id = os.getenv("BUILDER_DATABASE_ID", "")
 
         if not api_key:
-            raise ValueError("NOTION_API_KEY 환경변수가 설정되지 않았습니다.")
+            raise ValueError("BUILDER_NOTION_TOKEN 환경변수가 설정되지 않았습니다.")
 
         if not database_id:
-            raise ValueError("NOTION_DATABASE_ID 환경변수가 설정되지 않았습니다.")
+            raise ValueError("BUILDER_DATABASE_ID 환경변수가 설정되지 않았습니다.")
 
         self.api_key = api_key
         self.database_id = database_id
