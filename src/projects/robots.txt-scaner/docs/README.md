@@ -1,87 +1,69 @@
-# robots.txt Scanner
+# Robots.txt Scanner
 
-A high-performance, asynchronous CLI tool designed to audit web scraping permissions at scale. It fetches and parses `robots.txt` files for thousands of domains simultaneously and exports the results to JSON.
+A high-performance, asynchronous command-line tool designed to audit `robots.txt` files for a large volume of target domains. It efficiently fetches, parses, and analyzes robots.txt files, exporting detailed results in JSON format.
 
 ## Features
 
-*   **High Concurrency:** Utilizes Python's `asyncio` and `aiohttp` to handle thousands of checks efficiently.
-*   **Flexible Input:** Accepts URLs from text files or standard input (STDIN).
-*   **Detailed Parsing:** Extracts User-agent groups, Allow/Disallow rules, Crawl-delay, and Sitemap directives.
-*   **Structured Output:** Generates detailed JSON reports including HTTP status codes, fetch times, and parsed rules.
-*   **Resilient:** Built-in retry logic handling, timeout configuration, and error reporting for missing or unreachable files.
+- **High Throughput:** Uses asynchronous I/O (`asyncio`, `aiohttp`) to process thousands of URLs concurrently.
+- **Smart Caching:** Built-in SQLite caching to avoid re-scanning domains within 24 hours.
+- **Standard Compliance:** Parses rules according to Robots Exclusion Protocol (REP).
+- **Detailed Reporting:** Provides JSON output including HTTP status, parsed rules (Allow/Disallow), and Sitemap URLs.
+- **Resilient:** Handles network timeouts and redirects gracefully.
 
 ## Installation
 
-### Prerequisites
+1. **Clone the repository**
+   ```bash
+   git clone <repository-url>
+   cd robots-txt-scanner
+   ```
 
-*   Python 3.9 or higher
-
-### Setup
-
-1.  Clone the repository or copy the source code.
-2.  Install the required dependencies:
-
-```bash
-pip install -r requirements.txt
-```
+2. **Install Dependencies**
+   Create a virtual environment (recommended) and install required packages:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+   pip install -r requirements.txt
+   ```
 
 ## Usage
 
-### Basic Command Syntax
+### Basic Syntax
 
 ```bash
-python -m src.main scan -i <input_file> -o <output_file> [OPTIONS]
+python -m src.main [OPTIONS] INPUT_SOURCE
 ```
+
+### Arguments
+
+- `INPUT_SOURCE`: Path to a text file containing URLs (one per line) or `-` to read from stdin.
 
 ### Options
 
-| Option | Short | Description | Default |
+| Option | Short | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--input` | `-i` | Path to file containing URLs (one per line). Use `-` for STDIN. | Required |
-| `--output` | `-o` | Path to the output JSON file. | `results.json` |
-| `--workers` | `-w` | Number of concurrent async workers. | `50` |
-| `--timeout` | `-t` | HTTP request timeout in seconds. | `10` |
-| `--verbose` | `-v` | Enable detailed logging to stdout. | `False` |
+| `--output` | `-o` | `results.json` | Path to the output JSON file. |
+| `--concurrency` | `-c` | `50` | Number of concurrent async requests. |
+| `--timeout` | `-t` | `10` | Request timeout in seconds. |
+| `--user-agent` | | `RobotsTxtScanner/1.0` | Custom User-Agent string. |
+| `--verbose` | `-v` | `False` | Enable verbose logging. |
 
 ### Examples
 
-1.  **Scan from a file:**
-    Scan a list of URLs in `urls.txt` and save results to `report.json`.
+1. **Scan URLs from a file**
+   ```bash
+   python -m src.main input/urls.txt --output report.json --concurrency 100
+   ```
 
-    ```bash
-    python -m src.main scan -i urls.txt -o report.json
-    ```
+2. **Scan URLs via stdin (pipe)**
+   ```bash
+   cat input/urls.txt | python -m src.main - -output report.json
+   ```
 
-2.  **High concurrency scan:**
-    Process a large list with 200 workers and a 5-second timeout.
-
-    ```bash
-    python -m src.main scan -i massive_list.txt -o report.json -w 200 -t 5
-    ```
-
-3.  **Using Standard Input (Pipe):**
-    Use another command to generate URLs and pipe them into the scanner.
-
-    ```bash
-    echo "https://google.com\nhttps://example.com" | python -m src.main scan -i - -o report.json
-    ```
-
-    Or from a file using cat:
-    ```bash
-    cat my_urls.txt | python -m src.main scan -i - -o report.json
-    ```
-
-## Input Format
-
-The input file (or STDIN) should contain one URL per line.
-
-```text
-https://example.com/page1
-https://subdomain.example.com/images
-https://another-site.com
-```
-
-The tool automatically normalizes these URLs to their root domain to fetch the correct `robots.txt` (e.g., `https://example.com/robots.txt`).
+3. **Custom User-Agent and Timeout**
+   ```bash
+   python -m src.main urls.txt --user-agent "MyBot/2.0" --timeout 15
+   ```
 
 ## Output Format
 
@@ -90,45 +72,60 @@ The tool generates a JSON file containing an array of result objects.
 ```json
 [
   {
-    "domain": "example.com",
+    "target_url": "https://example.com/some/page",
     "robots_url": "https://example.com/robots.txt",
-    "status": 200,
-    "fetch_time_ms": 145,
-    "content_found": true,
-    "parsed_rules": {
-      "user_agents": ["*"],
-      "disallows": ["/admin", "/login"],
-      "allows": ["/public"],
-      "crawl_delay": null,
-      "sitemap": "https://example.com/sitemap.xml"
-    },
+    "status_code": 200,
+    "content_length": 1024,
+    "crawl_delay": null,
+    "sitemap_urls": [
+      "https://example.com/sitemap.xml"
+    ],
+    "rules": [
+      {
+        "user_agent": "*",
+        "allow": ["/", "/public"],
+        "disallow": ["/admin", "/private"]
+      }
+    ],
+    "raw_content": "User-agent: * ...\n...",
     "error": null
   },
   {
-    "domain": "missing-site.com",
+    "target_url": "https://missing-site.com",
     "robots_url": "https://missing-site.com/robots.txt",
-    "status": 404,
-    "fetch_time_ms": 52,
-    "content_found": false,
-    "parsed_rules": null,
-    "error": "HTTP 404 Not Found"
+    "status_code": 404,
+    "error": "Not Found",
+    "rules": [],
+    "sitemap_urls": []
   }
 ]
 ```
 
-## Testing
+## Running Tests
 
-Run the unit tests using `pytest`:
+To run the unit tests, ensure `pytest` is installed:
 
 ```bash
+pip install pytest
 pytest tests/
 ```
 
-## Security & Best Practices
+## Project Structure
 
-*   **Input Validation:** All URLs are normalized and validated before processing to prevent injection attacks.
-*   **Concurrency Control:** Built-in semaphores prevent overwhelming target servers (DoS protection).
-*   **Error Handling:** Network errors and timeouts are caught gracefully, ensuring the scan continues for other targets.
+```
+robots-txt-scanner/
+├── src/
+│   ├── __init__.py
+│   ├── main.py              # CLI entry point
+│   └── scanner.py          # Core logic (Fetcher, Parser, Cache)
+├── tests/
+│   └── test_main.py         # Unit tests
+├── docs/
+│   └── README.md            # This file
+├── requirements.txt          # Python dependencies
+└── input/
+    └── urls.txt             # Example input file
+```
 
 ## License
 

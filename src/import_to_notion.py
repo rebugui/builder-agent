@@ -12,7 +12,7 @@ import sys
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(project_root)
 
-from modules.builder.planner_notion import NotionPlanner
+from planner_notion import NotionPlanner
 
 
 def import_to_notion():

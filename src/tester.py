@@ -3,6 +3,7 @@
 Builder Agent - Self-Correction Tester
 
 샌드박스 환경에서 코드를 실행하고, 에러를 감지하여 자가 수정 루프를 수행합니다.
+OpenCode 통합으로 AI 기반 코드 리뷰 및 수정 지원
 """
 
 import os
@@ -10,25 +11,30 @@ import subprocess
 import sys
 import json
 import re
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass
 from pathlib import Path
 
-# Add project root to sys.path
 current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parents[1]
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
-from modules.builder.builder_config import config
-from modules.builder.utils.logger import setup_logger
-from modules.builder.coder import CodeGenerator
+from builder_config import config
+from utils.logger import setup_logger
+from coder import CodeGenerator
+
+try:
+    from opencode_client import OpenCodeClient
+    OPENCODE_AVAILABLE = True
+except ImportError:
+    OPENCODE_AVAILABLE = False
 
 logger = setup_logger("SelfCorrectionTester")
 
+
 @dataclass
 class TestResult:
-    """테스트 결과 데이터 클래스"""
     passed: bool
     stdout: str
     stderr: str
@@ -37,14 +43,38 @@ class TestResult:
     error_message: Optional[str] = None
 
 
+@dataclass
+class CodeReview:
+    severity: str
+    category: str
+    line: Optional[int]
+    message: str
+    suggestion: Optional[str]
+
+
 class SelfCorrectionTester:
     """Self-Correction Tester (자가 수정 테스터)"""
 
-    def __init__(self, coder: CodeGenerator = None):
-        """초기화"""
+    def __init__(self, coder: CodeGenerator = None, use_opencode: bool = True):
         self.coder = coder if coder else CodeGenerator()
-        self.max_retries = 10  # 자가수정 최대 10회
+        self.max_retries = 10
         self.timeout = 30
+        self.use_opencode = use_opencode and OPENCODE_AVAILABLE
+        
+        if self.use_opencode:
+            try:
+                self.opencode_client = OpenCodeClient(
+                    model="zai-coding-plan/glm-5",
+                    project_path=str(config.PROJECT_ROOT),
+                    timeout=120
+                )
+                logger.info("OpenCode 리뷰 기능 활성화")
+            except Exception as e:
+                logger.warning(f"OpenCode 초기화 실패: {e}")
+                self.use_opencode = False
+                self.opencode_client = None
+        else:
+            self.opencode_client = None
 
     def run_unit_tests(self, project_dir: str) -> TestResult:
         """단위 테스트 실행 (pytest)"""
@@ -401,6 +431,140 @@ import sys
         logger.error(f"Max retries exceeded ({max_retries})")
         final_result = self.run_unit_tests(project_dir)
         return False, final_result, max_retries
+
+    def review_code_with_opencode(self, code: str, file_path: str = None) -> List[CodeReview]:
+        """OpenCode로 코드 리뷰"""
+        if not self.use_opencode or not self.opencode_client:
+            logger.warning("OpenCode 리뷰 비활성화됨")
+            return []
+        
+        result = self.opencode_client.review_code(code)
+        
+        if not result.success:
+            logger.error(f"코드 리뷰 실패: {result.error}")
+            return []
+        
+        reviews = self._parse_review_output(result.output, file_path)
+        logger.info(f"코드 리뷰 완료: {len(reviews)}개 이슈 발견")
+        return reviews
+
+    def _parse_review_output(self, output: str, file_path: str = None) -> List[CodeReview]:
+        review_text = output
+        reviews = []
+        
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', output)
+            if json_match:
+                data = json.loads(json_match.group())
+                
+                if "issues" in data:
+                    for issue in data["issues"]:
+                        reviews.append(CodeReview(
+                            severity=issue.get("severity", "medium"),
+                            category=issue.get("type", "general"),
+                            line=issue.get("line"),
+                            message=issue.get("description", ""),
+                            suggestion=issue.get("suggestion")
+                        ))
+        except json.JSONDecodeError:
+            lines = review_text.split('\n')
+            for i, line in enumerate(lines):
+                if any(word in line.lower() for word in ['error', 'warning', 'issue', 'problem', '보안', '성능', '버그']):
+                    reviews.append(CodeReview(
+                        severity="medium",
+                        category="general",
+                        line=None,
+                        message=line.strip(),
+                        suggestion=lines[i+1].strip() if i+1 < len(lines) else None
+                    ))
+        
+        return reviews
+
+    def fix_with_opencode(self, code: str, error_message: str, error_type: str = None) -> Optional[str]:
+        """OpenCode로 코드 수정"""
+        if not self.use_opencode or not self.opencode_client:
+            return None
+        
+        result = self.opencode_client.fix_code(code, error_message, error_type)
+        
+        if result.success and result.files:
+            for filepath, content in result.files.items():
+                return content
+        
+        logger.error(f"OpenCode 수정 실패: {result.error}")
+        return None
+
+    def test_and_fix_with_opencode(
+        self,
+        project_dir: str,
+        project_name: str,
+        max_retries: int = None
+    ) -> Tuple[bool, TestResult, int]:
+        if max_retries is None:
+            max_retries = min(self.max_retries, 5)
+        
+        logger.info(f"Starting OpenCode-enhanced self-correction (Max: {max_retries})")
+        
+        for attempt in range(1, max_retries + 1):
+            logger.info(f"Attempt {attempt}/{max_retries}:")
+            
+            lint_result = self.run_lint_checks(project_dir)
+            if not lint_result.passed:
+                logger.warning(f"Lint check failed: {lint_result.error_message}")
+                
+                if self.use_opencode:
+                    error_file = self._find_error_file(project_dir, lint_result.stderr)
+                    if error_file:
+                        code = Path(error_file).read_text(encoding='utf-8')
+                        fixed_code = self.fix_with_opencode(code, lint_result.error_message, lint_result.error_type)
+                        if fixed_code:
+                            Path(error_file).write_text(fixed_code, encoding='utf-8')
+                            logger.info(f"✅ OpenCode로 수정 완료: {error_file}")
+                            continue
+                
+                if not self.fix_error(project_dir, lint_result, project_name):
+                    return False, lint_result, attempt
+                continue
+            
+            test_result = self.run_unit_tests(project_dir)
+            if test_result.passed:
+                logger.info("✅ Tests passed!")
+                return True, test_result, attempt
+            else:
+                logger.warning(f"Tests failed: {test_result.error_type}: {test_result.error_message[:100]}")
+                
+                if self.use_opencode:
+                    error_file = self._find_error_file(project_dir, test_result.stderr + test_result.stdout)
+                    if error_file:
+                        code = Path(error_file).read_text(encoding='utf-8')
+                        fixed_code = self.fix_with_opencode(code, test_result.error_message, test_result.error_type)
+                        if fixed_code:
+                            Path(error_file).write_text(fixed_code, encoding='utf-8')
+                            logger.info(f"✅ OpenCode로 수정 완료: {error_file}")
+                            continue
+                
+                if not self.fix_error(project_dir, test_result, project_name):
+                    return False, test_result, attempt
+        
+        logger.error(f"Max retries exceeded ({max_retries})")
+        final_result = self.run_unit_tests(project_dir)
+        return False, final_result, max_retries
+
+    def _find_error_file(self, project_dir: str, output: str) -> Optional[str]:
+        src_dir = Path(project_dir) / 'src'
+        if not src_dir.exists():
+            return None
+        
+        py_files = list(src_dir.glob('*.py'))
+        for f in py_files:
+            if f.stem in output:
+                return str(f)
+        
+        if py_files:
+            return str(py_files[0])
+        
+        return None
+
 
 if __name__ == "__main__":
     pass

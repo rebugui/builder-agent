@@ -33,8 +33,8 @@ load_env_file()
 class Config:
     # GLM Settings (Builder Agent)
     GLM_API_KEY = os.getenv("BUILDER_LLM_API_KEY", "")
-    GLM_BASE_URL = os.getenv("BUILDER_LLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4/")
-    GLM_MODEL = os.getenv("BUILDER_LLM_MODEL", "glm-4.7")
+    GLM_BASE_URL = os.getenv("BUILDER_LLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
+    GLM_MODEL = os.getenv("BUILDER_LLM_MODEL", "glm-5")
     GLM_TIMEOUT = 120
 
     # Notion Settings (Builder Agent)

@@ -1,134 +1,111 @@
-"""
-Unit tests for robots.txt Scanner.
-Focuses on URL normalization and parsing logic.
-"""
 import pytest
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
-
-# Ensure src is in path for imports
-import sys
+import json
 import os
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
+from io import StringIO
+
+# Adjust path to import src modules
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.scanner import normalize_url, RobotsParser
+from src.main import read_urls, write_results
+from src.scanner import RobotsScanner, RobotsParser, CacheManager
 
+@pytest.fixture
+def sample_urls_file(tmp_path):
+    """Fixture to create a temporary file with URLs."""
+    file_path = tmp_path / "urls.txt"
+    content = "https://example.com\nhttps://google.com\n# Comment\nhttps://github.com"
+    file_path.write_text(content)
+    return file_path
 
-class TestUrlNormalization:
-    """Tests for URL normalization logic."""
+class TestInputOutput:
+    def test_read_urls_from_file(self, sample_urls_file):
+        urls = read_urls(str(sample_urls_file))
+        assert len(urls) == 3
+        assert "https://example.com" in urls
+        assert "# Comment" not in urls
 
-    def test_normalize_valid_url(self):
-        """Test normalization of a valid HTTPS URL."""
-        url = "https://example.com/page1"
-        assert normalize_url(url) == "example.com"
+    def test_read_urls_from_stdin(self):
+        dummy_input = StringIO("https://test.com\nhttps://dev.com\n")
+        urls = read_urls(dummy_input)
+        assert len(urls) == 2
+        assert urls[0] == "https://test.com"
 
-    def test_normalize_valid_http_url(self):
-        """Test normalization of a valid HTTP URL."""
-        url = "http://test-site.com"
-        assert normalize_url(url) == "test-site.com"
-
-    def test_normalize_url_without_scheme(self):
-        """Test normalization when scheme is missing."""
-        url = "sub.domain.com/path"
-        assert normalize_url(url) == "sub.domain.com"
-
-    def test_normalize_invalid_url(self):
-        """Test normalization of a malformed URL."""
-        assert normalize_url("") is None
-        # urlparse might parse "ftp://" differently, but for http/https context:
-        # We rely on urlparse inside normalize_url
-        assert normalize_url("ht tp://bad") is None
-
+    def test_write_results(self, tmp_path):
+        results = [{"url": "https://example.com", "status": 200}]
+        output_path = tmp_path / "output.json"
+        write_results(results, str(output_path))
+        
+        assert os.path.exists(output_path)
+        with open(output_path, 'r') as f:
+            data = json.load(f)
+        assert data == results
 
 class TestRobotsParser:
-    """Tests for the RobotsParser logic."""
-
     def test_parse_basic_rules(self):
-        """Test parsing basic Allow/Disallow rules."""
         content = """
         User-agent: *
         Disallow: /admin
-        Allow: /public
+        Allow: /
+        
+        User-agent: Googlebot
+        Disallow: /private
+        Sitemap: https://example.com/sitemap.xml
         """
-        parser = RobotsParser(content)
-        result = parser.parse()
+        parsed = RobotsParser.parse(content)
         
-        assert "*" in result["user_agents"]
-        assert "/admin" in result["disallows"]
-        assert "/public" in result["allows"]
+        assert "https://example.com/sitemap.xml" in parsed['sitemap_urls']
+        assert len(parsed['rules']) == 2
+        
+        rule_star = next(r for r in parsed['rules'] if r['user_agent'] == '*')
+        assert '/admin' in rule_star['disallow']
+        assert '/' in rule_star['allow']
+        
+        rule_google = next(r for r in parsed['rules'] if r['user_agent'] == 'Googlebot')
+        assert '/private' in rule_google['disallow']
 
-    def test_parse_crawl_delay(self):
-        """Test parsing Crawl-delay directive."""
-        content = "Crawl-delay: 5.5"
-        parser = RobotsParser(content)
-        result = parser.parse()
-        
-        assert result["crawl_delay"] == 5.5
+class TestScannerLogic:
+    @pytest.mark.asyncio
+    async def test_scan_single_url_success(self):
+        # Mocking aiohttp session response
+        with patch('src.scanner.aiohttp.ClientSession') as MockSession:
+            mock_response = AsyncMock()
+            mock_response.status = 200
+            mock_response.headers = {'Content-Length': '100'}
+            mock_response.text = AsyncMock(return_value="User-agent: *\nDisallow: /")
+            mock_response.reason = "OK"
+            
+            mock_session = AsyncMock()
+            mock_session.get = MagicMock(return_value=mock_response.__aenter__.return_value)
+            mock_session.closed = False
+            
+            MockSession.return_value = mock_session
 
-    def test_parse_sitemap(self):
-        """Test parsing Sitemap directive."""
-        content = "Sitemap: https://example.com/sitemap.xml"
-        parser = RobotsParser(content)
-        result = parser.parse()
-        
-        assert result["sitemap"] == "https://example.com/sitemap.xml"
-
-    def test_parse_comments_and_empty_lines(self):
-        """Test that comments and empty lines are ignored."""
-        content = """
-        # This is a comment
-        
-        User-agent: bot
-        
-        """
-        parser = RobotsParser(content)
-        result = parser.parse()
-        
-        assert "bot" in result["user_agents"]
-        assert "#" not in result["user_agents"]
-
-
-class TestRobotsFetcher:
-    """Tests for RobotsFetcher (Async)."""
+            # Mock Cache to avoid DB ops during unit test
+            with patch.object(RobotsScanner, '__init__', lambda self, concurrency, timeout, user_agent: None):
+                scanner = RobotsScanner(concurrency=10, timeout=5, user_agent="Test")
+                scanner.cache = MagicMock()
+                scanner.cache.get = MagicMock(return_value=None)
+                scanner.session = mock_session
+                
+                result = await scanner.scan_single_url("https://example.com")
+                
+                assert result['status_code'] == 200
+                assert len(result['rules']) == 1
+                assert result['rules'][0]['user_agent'] == '*'
+                assert result['target_url'] == "https://example.com"
 
     @pytest.mark.asyncio
-    async def test_fetch_success(self):
-        """Test successful fetch and parsing."""
-        # Mocking aiohttp response
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.text = AsyncMock(return_value="User-agent: *\nDisallow: /")
-        mock_response.reason = "OK"
-
-        mock_session = AsyncMock()
-        mock_session.get.return_value.__aenter__.return_value = mock_response
-
-        fetcher = RobotsFetcher(mock_session, timeout=10)
-        result = await fetcher.fetch("example.com")
-
-        assert result["status"] == 200
-        assert result["content_found"] is True
-        assert result["parsed_rules"] is not None
-        assert "/" in result["parsed_rules"]["disallows"]
-        assert result["error"] is None
-
-    @pytest.mark.asyncio
-    async def test_fetch_404(self):
-        """Test handling of 404 errors."""
-        mock_response = AsyncMock()
-        mock_response.status = 404
-        mock_response.reason = "Not Found"
-
-        mock_session = AsyncMock()
-        mock_session.get.return_value.__aenter__.return_value = mock_response
-
-        fetcher = RobotsFetcher(mock_session, timeout=10)
-        result = await fetcher.fetch("example.com")
-
-        assert result["status"] == 404
-        assert result["content_found"] is False
-        assert "404" in result["error"]
-
-
-if __name__ == "__main__":
-    pytest.main()
+    async def test_scan_single_url_invalid(self):
+        with patch('src.scanner.aiohttp.ClientSession'):
+            with patch.object(RobotsScanner, '__init__', lambda self, concurrency, timeout, user_agent: None):
+                scanner = RobotsScanner(concurrency=10, timeout=5, user_agent="Test")
+                scanner.cache = MagicMock()
+                scanner.session = MagicMock()
+                
+                result = await scanner.scan_single_url("not-a-valid-url")
+                
+                assert result['status_code'] == 0
+                assert "Invalid URL" in result['error']

@@ -4,6 +4,8 @@ Builder Agent - Main Orchestrator
 
 빌더 에이전트의 전체 파이프라인을 조율합니다:
 Planner → Coder → Tester → GitManager
+
+OpenCode 통합으로 GLM-5 기반 에이전트 기능 제공
 """
 
 import os
@@ -13,51 +15,54 @@ from pathlib import Path
 import argparse
 from datetime import datetime
 
-# Add project root to sys.path
 current_dir = Path(__file__).resolve().parent
-project_root = current_dir.parents[1]
+project_root = current_dir
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
-from modules.builder.builder_config import config
-from modules.builder.utils.logger import setup_logger
-# from modules.builder.planner import TopicPlanner, Project  # Local DB Planner
-from modules.builder.planner_notion import NotionPlanner  # Notion Planner
-from modules.builder.coder import CodeGenerator
-from modules.builder.tester import SelfCorrectionTester, TestResult
-from modules.builder.git_manager import GitManager, RepoInfo
+from builder_config import config
+from utils.logger import setup_logger
+from planner_notion import NotionPlanner
+from coder import CodeGenerator
+from tester import SelfCorrectionTester, TestResult
+from git_manager import GitManager, RepoInfo
 
 logger = setup_logger("BuilderAgentMain")
+
 
 class BuilderAgentMain:
     """Builder Agent Main Orchestrator"""
 
-    # 파이프라인 재시도 상수
     MAX_PIPELINE_RETRIES = 2
     RETRY_DELAY_SECONDS = 60
 
-    def __init__(self, db_path: str = None, github_token: str = None):
-        """초기화"""
-        # self.planner = TopicPlanner(db_path=db_path)
+    def __init__(
+        self,
+        db_path: str = None,
+        github_token: str = None,
+        use_opencode: bool = True
+    ):
         try:
             self.planner = NotionPlanner()
             logger.info("✅ Connected to Notion Planner")
         except Exception as e:
             logger.error(f"❌ Failed to connect to Notion: {e}")
             logger.warning("Falling back to local TopicPlanner")
-            from modules.builder.planner import TopicPlanner
+            from planner import TopicPlanner
             self.planner = TopicPlanner(db_path=db_path)
 
-        self.coder = CodeGenerator()
-        self.tester = SelfCorrectionTester(coder=self.coder)
+        mode = "opencode" if use_opencode else "glm"
+        self.coder = CodeGenerator(mode=mode)
+        self.tester = SelfCorrectionTester(coder=self.coder, use_opencode=use_opencode)
 
-        # Lazy init handled by property or just allow passing token to init
         self._git_manager = None
         self._github_token = github_token
+        self.use_opencode = use_opencode
 
         self.projects_dir = config.PROJECTS_DIR
-        # Ensure projects dir exists
         self.projects_dir.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"Builder Agent 초기화 완료 (OpenCode: {use_opencode})")
 
     @property
     def git_manager(self) -> GitManager:

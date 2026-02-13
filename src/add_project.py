@@ -10,7 +10,7 @@ import sys
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(project_root)
 
-from modules.builder.main import BuilderAgentMain
+from main import BuilderAgentMain
 
 # 프로젝트 정보
 project_name = "File Converter"

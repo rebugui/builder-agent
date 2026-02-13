@@ -1,216 +1,135 @@
-#!/usr/bin/env python3
-"""
-robots.txt Scanner - Main Entry Point
-
-A high-performance CLI tool to scan robots.txt files for multiple domains.
-"""
-import sys
 import argparse
+import sys
 import json
+import logging
 import asyncio
-import signal
-from typing import Set, List, Dict, Any
+from typing import List, IO
+from .scanner import RobotsScanner, logger
 
-# Check for aiohttp availability at the global scope to avoid NameError in async functions
-try:
-    import aiohttp
-except ImportError:
-    sys.exit("[ERROR] 'aiohttp' is not installed. Please run 'pip install aiohttp'")
-
-# Try to import local scanner module. 
-# Changed from relative import (.scanner) to absolute import (scanner) 
-# to allow the script to run standalone.
-try:
-    from scanner import RobotsFetcher, normalize_url
-except ImportError:
-    # If running as part of a package, you might need to adjust this back to from .scanner import ...
-    sys.exit("[ERROR] 'scanner.py' module not found. Please ensure scanner.py is in the same directory.")
-
-
-# Graceful shutdown handling
-shutdown_event = asyncio.Event()
-
-
-def signal_handler(sig, frame):
-    """Handle Ctrl+C gracefully."""
-    print("\n[INFO] Shutdown signal received. Finishing pending tasks...")
-    shutdown_event.set()
-
-
-async def worker(
-    queue: asyncio.Queue,
-    results: List[Dict[str, Any]],
-    fetcher: RobotsFetcher,
-    semaphore: asyncio.Semaphore,
-    verbose: bool = False
-):
-    """
-    Async worker that processes domains from the queue.
-    """
-    while True:
-        # Wait for a domain or shutdown signal
-        try:
-            domain = queue.get_nowait()
-        except asyncio.QueueEmpty:
-            break
-
-        if shutdown_event.is_set():
-            queue.task_done()
-            break
-
-        async with semaphore:
-            try:
-                result = await fetcher.fetch(domain)
-                results.append(result)
-                if verbose:
-                    print(f"[OK] {domain}")
-            except Exception as e:
-                error_msg = f"Failed to process {domain}: {e}"
-                if verbose:
-                    print(f"[ERROR] {error_msg}")
-                # Append error information to results to maintain list integrity
-                results.append({
-                    "domain": domain,
-                    "status": "error",
-                    "error": str(e)
-                })
-            finally:
-                queue.task_done()
-            
-            # Optional: Simple progress indicator
-            # print(f".", end="", flush=True) 
-
-
-async def process_domains(
-    domains: Set[str],
-    workers: int,
-    timeout: int,
-    verbose: bool
-) -> List[Dict[str, Any]]:
-    """
-    Orchestrates the scanning process.
-    """
-    queue = asyncio.Queue()
-    for domain in domains:
-        await queue.put(domain)
-
-    results = []
-    semaphore = asyncio.Semaphore(workers)
-    
-    # aiohttp is imported at the top level now, so it is accessible here
-    async with aiohttp.ClientSession() as session:
-        fetcher = RobotsFetcher(session, timeout=timeout)
+def read_urls(source) -> List[str]:
+    """Read URLs from a file path or stdin."""
+    urls = []
+    try:
+        if isinstance(source, str):
+            # File path
+            with open(source, 'r', encoding='utf-8') as f:
+                for line in f:
+                    url = line.strip()
+                    if url and not url.startswith('#'):
+                        urls.append(url)
+        else:
+            # stdin
+            for line in source:
+                url = line.strip()
+                if url and not url.startswith('#'):
+                    urls.append(url)
+    except FileNotFoundError:
+        logger.error(f"File not found: {source}")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Error reading input: {e}")
+        sys.exit(1)
         
-        # Create worker tasks
-        tasks = []
-        for _ in range(workers):
-            task = asyncio.create_task(worker(queue, results, fetcher, semaphore, verbose))
-            tasks.append(task)
+    return urls
 
-        # Wait for all tasks to complete
-        await asyncio.gather(*tasks)
-    
-    return results
+def write_results(results: List[dict], output_path: str):
+    """Write scan results to JSON file."""
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+        logger.info(f"Results successfully saved to {output_path}")
+    except IOError as e:
+        logger.error(f"Failed to write output file: {e}")
+        sys.exit(1)
 
-
-def parse_args():
-    """Parses command line arguments."""
+async def main():
     parser = argparse.ArgumentParser(
-        description="robots.txt Scanner: Audit web scraping permissions at scale."
+        description="Robots.txt Scanner - A high-performance bulk auditor.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
-        "-i", "--input", 
-        required=True, 
-        help="Path to file containing URLs (one per line) or '-' for STDIN."
+        "input_source",
+        nargs="?",
+        default="-",
+        help="Path to a text file containing URLs or '-' for stdin."
     )
     parser.add_argument(
-        "-o", "--output", 
-        default="results.json", 
-        help="Path to output JSON file (default: results.json)."
+        "--output", "-o",
+        default="results.json",
+        help="Path to the output JSON file."
     )
     parser.add_argument(
-        "-w", "--workers", 
-        type=int, 
-        default=50, 
-        help="Number of concurrent async workers (default: 50)."
+        "--concurrency", "-c",
+        type=int,
+        default=50,
+        help="Number of concurrent async requests."
     )
     parser.add_argument(
-        "-t", "--timeout", 
-        type=int, 
-        default=10, 
-        help="HTTP request timeout in seconds (default: 10)."
+        "--timeout", "-t",
+        type=int,
+        default=10,
+        help="Request timeout in seconds."
     )
     parser.add_argument(
-        "-v", "--verbose", 
-        action="store_true", 
+        "--user-agent",
+        default="RobotsTxtScanner/1.0",
+        help="Custom User-Agent string."
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
         help="Enable verbose logging."
     )
-    return parser.parse_args()
 
+    args = parser.parse_args()
 
-def main():
-    """Main execution function."""
-    args = parse_args()
-    
-    # Setup signal handling
-    signal.signal(signal.SIGINT, signal_handler)
+    # Set logging level
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.INFO)
 
-    domains = set()
-    
     # Input Handling
-    try:
-        if args.input == '-':
-            # Read from STDIN
-            print("[INFO] Reading URLs from STDIN...")
-            for line in sys.stdin:
-                line = line.strip()
-                if line:
-                    domain = normalize_url(line)
-                    if domain:
-                        domains.add(domain)
-        else:
-            # Read from file
-            print(f"[INFO] Reading URLs from {args.input}...")
-            with open(args.input, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        domain = normalize_url(line)
-                        if domain:
-                            domains.add(domain)
-    except FileNotFoundError:
-        print(f"[ERROR] File not found: {args.input}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"[ERROR] Failed to read input: {e}")
-        sys.exit(1)
+    if args.input_source == "-":
+        logger.info("Reading URLs from stdin...")
+        urls = read_urls(sys.stdin)
+    else:
+        logger.info(f"Reading URLs from file: {args.input_source}")
+        urls = read_urls(args.input_source)
 
-    if not domains:
-        print("[ERROR] No valid domains found in input.")
+    if not urls:
+        logger.warning("No URLs found to scan. Exiting.")
         sys.exit(0)
 
-    print(f"[INFO] Starting scan for {len(domains)} unique domains with {args.workers} workers...")
+    logger.info(f"Starting scan for {len(urls)} URLs with concurrency {args.concurrency}...")
 
-    # Run Async Scan
+    # Initialize Scanner
+    scanner = RobotsScanner(
+        concurrency=args.concurrency,
+        timeout=args.timeout,
+        user_agent=args.user_agent
+    )
+
     try:
-        # aiohttp import and check is handled at module level
-        results = asyncio.run(process_domains(domains, args.workers, args.timeout, args.verbose))
-    except Exception as e:
-        print(f"[ERROR] An unexpected error occurred during scan: {e}")
-        # For debugging purposes, it is often helpful to print the traceback
-        # import traceback
-        # traceback.print_exc()
-        sys.exit(1)
-
-    # Save results
-    print(f"[INFO] Scan complete. Writing results to {args.output}...")
-    try:
-        with open(args.output, 'w', encoding='utf-8') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        print(f"[SUCCESS] Successfully processed {len(results)} domains.")
-    except IOError as e:
-        print(f"[ERROR] Failed to write output file: {e}")
-
+        # Run Scan
+        results = await scanner.run(urls)
+        
+        # Output Results
+        success_count = sum(1 for r in results if r.get('error') is None and 200 <= r.get('status_code', 0) < 300)
+        error_count = len(results) - success_count
+        
+        logger.info(f"Scan completed. Success: {success_count}, Errors: {error_count}")
+        write_results(results, args.output)
+        
+    finally:
+        await scanner.close()
 
 if __name__ == "__main__":
-    main()
+    # Note: Windows proactor event loop policy is often required for high concurrency subprocesses,
+    # but for aiohttp standard policy is usually fine. 
+    # Using asyncio.run handles loop creation.
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Process interrupted by user.")
+        sys.exit(1)

@@ -18,7 +18,7 @@ project_root = current_dir.parents[1]
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
-from modules.builder.planner_notion import NotionPlanner
+from planner_notion import NotionPlanner
 
 GITHUB_USERNAME = "rebugui"
 

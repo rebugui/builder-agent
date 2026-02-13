@@ -9,7 +9,7 @@ for path in [str(project_root), str(intelligence_dir)]:
     if path not in sys.path:
         sys.path.append(path)
 
-from modules.builder.coder import CodeGenerator
+from coder import CodeGenerator
 
 coder = CodeGenerator()
 try:

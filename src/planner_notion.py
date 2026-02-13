@@ -5,7 +5,7 @@ Builder Agent - Notion Planner
 Notion Database를 사용하여 프로젝트를 관리합니다.
 
 Usage:
-    from modules.builder.planner_notion import NotionPlanner
+    from planner_notion import NotionPlanner
     planner = NotionPlanner()
     project = planner.select_topic()
 """
@@ -113,6 +113,8 @@ class NotionPlanner:
 
     def _make_request(self, method: str, url: str, data: Dict = None) -> Dict:
         """Notion API 요청"""
+        response = None  # 초기화: NameError 방지
+        
         try:
             response = requests.request(
                 method=method,
@@ -123,9 +125,22 @@ class NotionPlanner:
             )
             response.raise_for_status()
             return response.json()
-        except requests.exceptions.RequestException as e:
+            
+        except requests.exceptions.Timeout:
+            print(f"⚠️ Notion API 타임아웃: {method} {url}")
+            raise Exception(f"Notion API 요청 타임아웃: {url}")
+            
+        except requests.exceptions.ConnectionError as e:
+            print(f"⚠️ Notion API 연결 실패: {str(e)}")
+            raise Exception(f"Notion API 연결 실패: {str(e)}")
+            
+        except requests.exceptions.HTTPError as e:
             if response is not None:
-                print(f"Server Response: {response.text}")
+                print(f"⚠️ Notion API HTTP 에러 ({e.response.status_code}): {response.text[:500]}")
+            raise Exception(f"Notion API HTTP 에러: {e.response.status_code}")
+            
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Notion API 요청 실패: {str(e)}")
             raise Exception(f"Notion API 요청 실패: {str(e)}")
 
     def _parse_project(self, result: Dict) -> NotionProject:

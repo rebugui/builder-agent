@@ -3,14 +3,30 @@ LLM Client Module
 OpenAI, GLM 등 LLM API와의 통신을 담당합니다.
 """
 
+import os
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from typing import Dict, List, Optional, Any
-from modules.intelligence.config import GLM_API_KEY, GLM_BASE_URL, GLM_MODEL
-from modules.intelligence.utils import setup_logger
 
-logger = setup_logger(__name__, "llm_client.log")
+# Local dependencies (Standardization: Keep dependencies within the agent)
+from utils.logger import setup_logger
+
+# Load Config from environment or builder_config
+# To maintain independence, we prefer environment variables or passed arguments
+# But we can fallback to builder_config if available
+try:
+    from builder_config import config
+    DEFAULT_API_KEY = config.GLM_API_KEY
+    DEFAULT_BASE_URL = config.GLM_BASE_URL
+    DEFAULT_MODEL = config.GLM_MODEL
+except ImportError:
+    # Fallback to env vars if config module is missing
+    DEFAULT_API_KEY = os.getenv("GLM_API_KEY", "")
+    DEFAULT_BASE_URL = os.getenv("GLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4/")
+    DEFAULT_MODEL = os.getenv("GLM_MODEL", "glm-4.7")
+
+logger = setup_logger("LLMClient")
 
 class LLMClient:
     """기본 LLM 클라이언트 추상 클래스 (Interface)"""
@@ -21,9 +37,9 @@ class GLMClient(LLMClient):
     """ZhipuAI GLM API 클라이언트"""
 
     def __init__(self, api_key: str = None, base_url: str = None, model: str = None):
-        self.api_key = api_key or GLM_API_KEY
-        self.base_url = base_url or GLM_BASE_URL
-        self.model = model or GLM_MODEL
+        self.api_key = api_key or DEFAULT_API_KEY
+        self.base_url = base_url or DEFAULT_BASE_URL
+        self.model = model or DEFAULT_MODEL
         self.timeout = 300  # 5분
 
         if not self.api_key:
@@ -78,6 +94,3 @@ class GLMClient(LLMClient):
             if hasattr(e, 'response') and e.response is not None:
                 logger.error(f"Response: {e.response.text}")
             raise Exception(f"GLM API 요청 실패: {str(e)}")
-
-# 전역 인스턴스 (필요 시 사용)
-# default_client = GLMClient()

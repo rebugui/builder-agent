@@ -15,7 +15,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.append(project_root)
 
 # Builder Agent 자체 LLM 클라이언트 사용
-from modules.builder.llm_client import GLMClient
+from llm_client import GLMClient
 
 
 class AITopicGenerator:
@@ -289,8 +289,8 @@ def main():
     add_to_db = input("이 주제들을 데이터베이스에 추가하시겠습니까? (y/n): ").strip().lower()
 
     if add_to_db == 'y':
-        from modules.builder.planner import TopicPlanner
-        from modules.builder.planner_notion import NotionPlanner
+        from planner import TopicPlanner
+        from planner_notion import NotionPlanner
 
         planner = TopicPlanner()
 

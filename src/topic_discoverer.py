@@ -26,7 +26,7 @@ except ImportError:
     from modules.intelligence.writer import GLMClient
 
 # Planner 임포트 (Notion)
-from modules.builder.planner_notion import NotionPlanner
+from planner_notion import NotionPlanner
 
 
 class TopicDiscoverer:

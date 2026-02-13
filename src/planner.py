@@ -19,8 +19,8 @@ project_root = current_dir.parents[1]
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
-from modules.builder.builder_config import config
-from modules.builder.utils.logger import setup_logger
+from builder_config import config
+from utils.logger import setup_logger
 
 logger = setup_logger("TopicPlanner")
 

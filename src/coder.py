@@ -2,7 +2,8 @@
 """
 Builder Agent - Code Generator
 
-GLM-4.7을 사용하여 구조화된 Python 코드를 생성합니다.
+GLM-5 + OpenCode를 사용하여 구조화된 Python 코드를 생성합니다.
+OpenCode 통합으로 에이전트 기반 코드 생성 지원
 """
 
 import os
@@ -10,21 +11,25 @@ import sys
 import re
 from typing import Dict, List, Optional
 from pathlib import Path
+from enum import Enum
 
-# Add project root and intelligence module to sys.path
+# Add project root to sys.path
 current_dir = Path(__file__).resolve().parent
-project_root = current_dir.parents[1]
-intelligence_dir = project_root / 'modules' / 'intelligence'
+if str(current_dir) not in sys.path:
+    sys.path.append(str(current_dir))
 
-for path in [str(project_root), str(intelligence_dir)]:
-    if path not in sys.path:
-        sys.path.append(path)
+from builder_config import config
+from prompts import Prompts
+from utils.logger import setup_logger
 
-from modules.builder.builder_config import config
-from modules.builder.prompts import Prompts
-from modules.builder.utils.logger import setup_logger
+# OpenCode Client
+try:
+    from opencode_client import OpenCodeClient, OpenCodeResult
+    OPENCODE_AVAILABLE = True
+except ImportError:
+    OPENCODE_AVAILABLE = False
 
-# Intelligence Agent GLM Client
+# Intelligence Agent GLM Client (Fallback)
 try:
     from llm_client import GLMClient
 except ImportError:
@@ -35,68 +40,157 @@ except ImportError:
 
 logger = setup_logger("CodeGenerator")
 
-class CodeGenerator:
-    """Code Generator (코드 생성)"""
 
-    def __init__(self):
-        """초기화"""
+class CodeGeneratorMode(Enum):
+    """코드 생성 모드"""
+    OPENCODE = "opencode"   # OpenCode CLI 사용 (권장)
+    GLM_DIRECT = "glm"      # GLM API 직접 호출 (Fallback)
+
+
+class CodeGenerator:
+    """
+    Code Generator (코드 생성)
+    
+    OpenCode CLI를 우선 사용하고, 실패 시 GLM API로 Fallback
+    """
+
+    def __init__(self, mode: str = "opencode"):
+        """
+        초기화
+        
+        Args:
+            mode: 생성 모드 ("opencode" 또는 "glm")
+        """
+        self.mode = CodeGeneratorMode(mode)
         self.api_key = config.GLM_API_KEY
         self.base_url = config.GLM_BASE_URL
         self.model = config.GLM_MODEL
+        self.project_path = str(config.PROJECT_ROOT)
         
-        if not self.api_key:
-             raise ValueError("GLM_API_KEY 환경변수가 설정되지 않았습니다.")
-
-        # GLM Client 초기화
-        if GLMClient:
-            self.client = GLMClient(self.api_key, self.base_url, self.model)
-        else:
-            raise ImportError("GLMClient module not found. Check your python path.")
+        # OpenCode 클라이언트 초기화
+        self.opencode_client = None
+        if self.mode == CodeGeneratorMode.OPENCODE and OPENCODE_AVAILABLE:
+            try:
+                self.opencode_client = OpenCodeClient(
+                    model="zai-coding-plan/glm-5",
+                    project_path=self.project_path,
+                    timeout=300
+                )
+                logger.info("✅ OpenCode 클라이언트 초기화 성공")
+            except Exception as e:
+                logger.warning(f"OpenCode 초기화 실패, GLM Fallback: {e}")
+                self.mode = CodeGeneratorMode.GLM_DIRECT
+        
+        # GLM Client 초기화 (Fallback)
+        if self.mode == CodeGeneratorMode.GLM_DIRECT:
+            if not self.api_key:
+                raise ValueError("GLM_API_KEY 환경변수가 설정되지 않았습니다.")
+            
+            if GLMClient:
+                self.client = GLMClient(self.api_key, self.base_url, self.model)
+                logger.info("✅ GLM Client 초기화 성공 (Direct Mode)")
+            else:
+                raise ImportError("GLMClient module not found. Check your python path.")
 
         self.system_prompt = Prompts.DEVOPS_EXPERT_SYSTEM
+        logger.info(f"CodeGenerator 모드: {self.mode.value}")
 
     def generate_spec(self, project_name: str, short_description: str) -> str:
         """상세 요구사항 명세서 생성"""
         logger.info(f"Generating technical spec for: {project_name}")
         
-        spec_prompt = (
-            f"You are a Software Architect. Create a detailed technical specification for the project '{project_name}'.\n"
-            f"Short Description: {short_description}\n\n"
-            "The specification must be in Markdown format and include:\n"
-            "1. Project Overview\n"
-            "2. User Stories / Requirements\n"
-            "3. Architecture & Tech Stack (Python based)\n"
-            "4. API Design / CLI Commands\n"
-            "5. Database Schema (if applicable)\n"
-            "6. Directory Structure\n\n"
-            "Output ONLY the Markdown content, starting with '# Technical Specification'."
-        )
+        spec_prompt = f"""You are a Software Architect. Create a detailed technical specification for the project '{project_name}'.
+
+Short Description: {short_description}
+
+The specification must be in Markdown format and include:
+1. Project Overview
+2. User Stories / Requirements
+3. Architecture & Tech Stack (Python based)
+4. API Design / CLI Commands
+5. Database Schema (if applicable)
+6. Directory Structure
+
+Output ONLY the Markdown content, starting with '# Technical Specification'."""
         
-        try:
-            spec_content = self.client.chat(
-                system_prompt="You are an expert Software Architect.",
-                user_prompt=spec_prompt
-            )
-            return spec_content
-        except Exception as e:
-            logger.error(f"Error generating spec: {e}")
-            return f"# Technical Specification (Fallback)\n\n{short_description}"
+        if self.mode == CodeGeneratorMode.OPENCODE and self.opencode_client:
+            result = self.opencode_client.run(spec_prompt, agent="plan")
+            if result.success:
+                return result.output
+            logger.warning(f"OpenCode 실패, Fallback: {result.error}")
+        
+        if GLMClient and hasattr(self, 'client'):
+            try:
+                return self.client.chat(
+                    system_prompt="You are an expert Software Architect.",
+                    user_prompt=spec_prompt
+                )
+            except Exception as e:
+                logger.error(f"Error generating spec: {e}")
+        
+        return f"# Technical Specification (Fallback)\n\n{short_description}"
 
     def generate_code(self, project_name: str, project_description: str) -> str:
         """Python 코드 생성"""
-        logger.info(f"Generating code for project: {project_name}")
+        logger.info(f"Generating code for project: {project_name} (mode: {self.mode.value})")
         
         user_prompt = Prompts.get_code_generation_prompt(project_name, project_description)
+        
+        if self.mode == CodeGeneratorMode.OPENCODE and self.opencode_client:
+            result = self.opencode_client.run(user_prompt, agent="build")
+            if result.success:
+                logger.info("OpenCode로 코드 생성 성공")
+                return result.output
+            logger.warning(f"OpenCode 실패, GLM Fallback: {result.error}")
+        
+        if GLMClient and hasattr(self, 'client'):
+            try:
+                generated_code = self.client.chat(
+                    system_prompt=self.system_prompt,
+                    user_prompt=user_prompt
+                )
+                logger.info("GLM Direct로 코드 생성 성공")
+                return generated_code
+            except Exception as e:
+                logger.error(f"Error generating code: {e}")
+                raise
+        
+        raise RuntimeError("사용 가능한 코드 생성기가 없습니다.")
 
-        try:
-            generated_code = self.client.chat(
-                system_prompt=self.system_prompt,
-                user_prompt=user_prompt
-            )
-            return generated_code
-        except Exception as e:
-            logger.error(f"Error generating code: {e}")
-            raise
+    def generate_code_with_opencode(
+        self,
+        project_name: str,
+        description: str,
+        files_needed: List[str] = None
+    ) -> Dict[str, str]:
+        """OpenCode로 직접 코드 생성 (파일 딕셔너리 반환)"""
+        if not self.opencode_client:
+            raise RuntimeError("OpenCode 클라이언트가 초기화되지 않았습니다.")
+        
+        result = self.opencode_client.generate_code(project_name, description, files_needed)
+        
+        if result.success and result.files:
+            return result.files
+        
+        raise RuntimeError(f"코드 생성 실패: {result.error}")
+
+    def review_code(self, code: str) -> Dict:
+        """코드 리뷰 (OpenCode 사용)"""
+        if self.opencode_client:
+            result = self.opencode_client.review_code(code)
+            if result.success:
+                return {"review": result.output, "success": True}
+        
+        return {"review": None, "success": False}
+
+    def fix_code(self, code: str, error_message: str, error_type: str = None) -> Dict[str, str]:
+        """코드 수정 (OpenCode 사용)"""
+        if self.opencode_client:
+            result = self.opencode_client.fix_code(code, error_message, error_type)
+            if result.success and result.files:
+                return result.files
+        
+        return {}
 
     def parse_generated_code(self, generated_code: str, project_name: str) -> Dict[str, str]:
         """생성된 코드를 파일별로 분리 (Regex 사용)"""

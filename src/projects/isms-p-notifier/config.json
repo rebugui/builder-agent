@@ -1,0 +1,15 @@
+{
+  "target_urls": {
+    "list_page": "https://isms-p.or.kr/ntcn/rcsrm/selectGnrlVrtlRcsrmList.do"
+  },
+  "check_interval_minutes": 30,
+  "notification": {
+    "enabled": true,
+    "sound": true,
+    "timeout_seconds": 10
+  },
+  "storage": {
+    "seen_posts_file": "seen_posts.json",
+    "log_file": "isms_p_notifier.log"
+  }
+}

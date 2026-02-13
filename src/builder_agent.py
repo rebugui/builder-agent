@@ -9,6 +9,7 @@ Usage:
 import os
 import re
 import requests
+from pathlib import Path
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 from enum import Enum
@@ -47,6 +48,41 @@ load_env()
 
 # API 설정 (환경 변수)
 GLM_API_KEY = os.getenv("GLM_API_KEY", "")
+
+
+def sanitize_project_name(name: str) -> str:
+    """
+    프로젝트 이름을 안전한 경로명으로 변환
+    경로 순회(Path Traversal) 공격 방지
+    """
+    if not name:
+        return "unnamed-project"
+    
+    sanitized = name.lower()
+    sanitized = sanitized.replace(' ', '-')
+    sanitized = re.sub(r'\.{2,}', '', sanitized)
+    sanitized = re.sub(r'[/\\:]', '-', sanitized)
+    sanitized = re.sub(r'[^a-z0-9\-_]', '', sanitized)
+    sanitized = re.sub(r'-{2,}', '-', sanitized)
+    sanitized = sanitized.strip('-_')
+    
+    return sanitized if sanitized else "unnamed-project"
+
+
+def validate_output_path(base_dir: str, project_name: str) -> str:
+    """
+    출력 경로가 기본 디렉토리 내에 있는지 검증
+    """
+    safe_name = sanitize_project_name(project_name)
+    base_path = Path(base_dir).resolve()
+    target_path = (base_path / safe_name).resolve()
+    
+    try:
+        target_path.relative_to(base_path)
+    except ValueError:
+        raise ValueError(f"Invalid project path: {target_path} is outside {base_path}")
+    
+    return str(target_path)
 GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4/")
 GLM_MODEL = os.getenv("GLM_MODEL", "glm-4.7")
 
@@ -189,13 +225,12 @@ import subprocess
 import socket
 
 def scan_web_directory(target_url):
-    """웹 디렉토리 무차 대 공격"""
+    '''웹 디렉토리 스캐너 예제'''
     try:
-        # 보안 코딩 가이드라인 준수
         response = subprocess.check_output(
             ['ping', '-c', '1', target_url],
             timeout=10,
-            shell=False  # shell=False 사용 (보안)
+            shell=False,
             capture_output=True
         )
         return response.decode('utf-8')
@@ -312,13 +347,12 @@ import subprocess
 import socket
 
 def scan_web_directory(target_url):
-    """웹 디렉토리 무차 대 공격"""
+    '''웹 디렉토리 스캐너 예제'''
     try:
-        # 보안 코딩 가이드라인 준수
         response = subprocess.check_output(
             ['ping', '-c', '1', target_url],
             timeout=10,
-            shell=False  # shell=False 사용 (보안)
+            shell=False,
             capture_output=True
         )
         return response.decode('utf-8')
@@ -487,7 +521,7 @@ MIT License
         Returns:
             프로젝트 구조 (Markdown)
         """
-        tool_name_kebab = tool_name.lower().replace(' ', '-')
+        tool_name_kebab = sanitize_project_name(tool_name)
 
         project_structure = f"""
 # {tool_name_kebab}
@@ -513,29 +547,36 @@ MIT License
 
     def save_code_to_files(self, tool_name: str, files: dict, output_dir: str):
         """
-        코드를 파일로 저장
+        코드를 파일로 저장 (경로 순회 공격 방지)
 
         Args:
             tool_name: 도구 이름
             files: 파일별 코드
             output_dir: 출력 디렉토리
-        """
-        tool_name_kebab = tool_name.lower().replace(' ', '-')
-        project_dir = os.path.join(output_dir, tool_name_kebab)
 
-        # 디렉토리 생성
+        Raises:
+            ValueError: 유효하지 않은 경로인 경우
+        """
+        tool_name_kebab = sanitize_project_name(tool_name)
+        project_dir = validate_output_path(output_dir, tool_name)
+        
+        project_path = Path(project_dir).resolve()
+        output_path = Path(output_dir).resolve()
+        
+        if not str(project_path).startswith(str(output_path)):
+            raise ValueError(f"Security: Path traversal attempt detected")
+
         os.makedirs(os.path.join(project_dir, 'src'), exist_ok=True)
         os.makedirs(os.path.join(project_dir, 'tests'), exist_ok=True)
         os.makedirs(os.path.join(project_dir, 'docs'), exist_ok=True)
 
-        # 파일 저장
         for filename, content in files.items():
-            filepath = os.path.join(project_dir, filename)
+            safe_filename = sanitize_project_name(filename.replace('.py', '')) + '.py'
+            filepath = os.path.join(project_dir, safe_filename)
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(content)
-            print(f"  → Created: {filename}")
+            print(f"  → Created: {safe_filename}")
 
-        # README.md 저장
         readme_content = self.create_readme(tool_name, f"{tool_name} DevOps 도구")
         readme_path = os.path.join(project_dir, 'README.md')
         with open(readme_path, 'w', encoding='utf-8') as f:
@@ -582,7 +623,7 @@ def main():
     print("🔄 코드 파싱 중...")
     print()
 
-    tool_name_kebab = tool_name.lower().replace(' ', '-')
+    tool_name_kebab = sanitize_project_name(tool_name)
     files = builder.parse_generated_code(generated_code, tool_name_kebab)
 
     print("✅ 코드 파싱 완료!")
