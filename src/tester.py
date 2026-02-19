@@ -320,8 +320,164 @@ import sys
         except SyntaxError:
             return False
 
+    def _extract_import_error_details(self, error_message: str, stderr: str) -> Optional[Dict]:
+        """
+        ImportError에서 누락된 심볼과 경로 추출
+        
+        Returns:
+            {
+                'missing_symbol': 'validate_url',
+                'import_path': 'src.scanner',
+                'target_file': 'src/scanner/__init__.py' or 'src/scanner/scanner.py'
+            }
+        """
+        # 패턴 1: cannot import name 'X' from 'Y'
+        pattern1 = r"cannot import name '([^']+)' from '([^']+)'"
+        match1 = re.search(pattern1, error_message + stderr)
+        
+        if match1:
+            missing_symbol = match1.group(1)
+            import_path = match1.group(2)
+            
+            # import 경로를 파일 경로로 변환
+            # src.scanner -> src/scanner/__init__.py 또는 src/scanner/scanner.py
+            path_parts = import_path.split('.')
+            
+            # __init__.py 우선
+            target_file = '/'.join(path_parts) + '/__init__.py'
+            
+            return {
+                'missing_symbol': missing_symbol,
+                'import_path': import_path,
+                'target_file': target_file
+            }
+        
+        # 패턴 2: cannot import name X from Y
+        pattern2 = r"cannot import name (\w+) from ([\w\.]+)"
+        match2 = re.search(pattern2, error_message + stderr)
+        
+        if match2:
+            missing_symbol = match2.group(1)
+            import_path = match2.group(2)
+            path_parts = import_path.split('.')
+            target_file = '/'.join(path_parts) + '/__init__.py'
+            
+            return {
+                'missing_symbol': missing_symbol,
+                'import_path': import_path,
+                'target_file': target_file
+            }
+        
+        return None
+
+    def fix_import_error(self, project_dir: str, test_result: TestResult, project_name: str) -> bool:
+        """
+        ImportError 특수 처리 - 누락된 함수/클래스 생성
+        """
+        import_details = self._extract_import_error_details(
+            test_result.error_message or "",
+            test_result.stderr
+        )
+        
+        if not import_details:
+            logger.warning("ImportError에서 누락된 심볼을 추출할 수 없음")
+            return self.fix_error(project_dir, test_result, project_name)
+        
+        missing_symbol = import_details['missing_symbol']
+        import_path = import_details['import_path']
+        target_file = import_details['target_file']
+        
+        logger.info(f"🔍 ImportError 분석: {missing_symbol} from {import_path}")
+        logger.info(f"📁 대상 파일: {target_file}")
+        
+        # 대상 파일 경로
+        target_path = Path(project_dir) / target_file
+        
+        # 파일이 존재하는지 확인
+        if not target_path.exists():
+            # 대체 경로 시도 (예: src/scanner/scanner.py)
+            alt_file = '/'.join(import_path.split('.')) + '.py'
+            alt_path = Path(project_dir) / alt_file
+            
+            if alt_path.exists():
+                target_path = alt_path
+                target_file = alt_file
+                logger.info(f"📁 대체 파일 사용: {target_file}")
+            else:
+                # 새 파일 생성
+                logger.info(f"📝 새 파일 생성: {target_file}")
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.touch()
+        
+        # 현재 파일 내용 읽기
+        try:
+            with open(target_path, 'r', encoding='utf-8') as f:
+                current_content = f.read()
+        except:
+            current_content = ""
+        
+        # LLM에게 누락된 함수/클래스 생성 요청
+        fix_prompt = f"""다음 Python 파일에 누락된 함수/클래스를 추가해주세요.
+
+=== 현재 파일 내용 ({target_file}) ===
+{current_content if current_content else "(빈 파일)"}
+
+=== 요구사항 ===
+1. 누락된 심볼: `{missing_symbol}`
+2. Import 경로: `{import_path}`
+3. 프로젝트: {project_name}
+
+=== 작업 지침 ===
+1. `{missing_symbol}` 함수 또는 클래스를 구현하세요.
+2. 이미 파일에 내용이 있으면, 기존 내용을 유지하고 새로운 코드만 추가하세요.
+3. 보안 코딩 가이드라인을 준수하세요.
+4. 적절한 docstring을 추가하세요.
+
+=== 출력 형식 (필수) ===
+반드시 아래 형식을 사용하세요.
+
+@@@START_FILE:{target_file}@@@
+파일의 전체 내용 (기존 + 새로운 코드)
+@@@END_FILE@@@
+"""
+        
+        try:
+            fixed_code_raw = self.coder.client.chat(
+                system_prompt="당신은 Python 코드 작성 전문가입니다.",
+                user_prompt=fix_prompt
+            )
+            
+            # 파싱
+            parsed_files = self._parse_with_delimiters(fixed_code_raw, project_name)
+            
+            if target_file in parsed_files:
+                new_content = parsed_files[target_file]
+                
+                # 구문 검증
+                if self._validate_syntax(new_content):
+                    with open(target_path, 'w', encoding='utf-8') as f:
+                        f.write(new_content)
+                    
+                    logger.info(f"✅ 누락된 심볼 추가 완료: {missing_symbol} in {target_file}")
+                    return True
+                else:
+                    logger.error(f"❌ 생성된 코드 구문 오류")
+                    return False
+            else:
+                logger.error(f"❌ 파싱 실패: {target_file}를 찾을 수 없음")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Import 에러 수정 실패: {e}")
+            return False
+
     def fix_error(self, project_dir: str, test_result: TestResult, project_name: str) -> bool:
-        """에러 수정 (다중 파싱 전략)"""
+        """에러 수정 (다중 파싱 전략) - ImportError 특수 처리"""
+        
+        # ImportError 특수 처리
+        if test_result.error_type == 'ImportError':
+            return self.fix_import_error(project_dir, test_result, project_name)
+        
         error_file = 'src/main.py'
 
         # Try to infer filename from error message
