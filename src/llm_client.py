@@ -40,7 +40,7 @@ class GLMClient(LLMClient):
         self.api_key = api_key or DEFAULT_API_KEY
         self.base_url = base_url or DEFAULT_BASE_URL
         self.model = model or DEFAULT_MODEL
-        self.timeout = 300  # 5분
+        self.timeout = 600  # 10분 (긴 코드 생성 대응)
 
         if not self.api_key:
             logger.warning("GLM_API_KEY is not set.")

@@ -40,8 +40,11 @@ class BuilderAgentMain:
         self,
         db_path: str = None,
         github_token: str = None,
-        use_opencode: bool = True
+        use_opencode: bool = None
     ):
+        if use_opencode is None:
+            use_opencode = os.getenv("USE_OPENCODE", "false").lower() == "true"
+        
         try:
             self.planner = NotionPlanner()
             logger.info("✅ Connected to Notion Planner")
@@ -152,7 +155,7 @@ STDERR (last 500 chars):
                 project_name = selected_project.name
                 project_description = selected_project.description
 
-                # 2. Spec Generation & Code Generation
+                # 2. Spec Generation & Code Generation (v2.0)
                 logger.info(f"Step 2: Spec & Code Generation for {project_name}")
 
                 # 2-1. Generate Spec
@@ -165,12 +168,11 @@ STDERR (last 500 chars):
                         self.planner.append_spec_to_page(selected_project.id, spec_content)
                         logger.info("Technical Spec uploaded to Notion.")
 
-                    # Use Spec for Code Generation (Better context)
+                    # v2.0: 템플릿 기반 코드 생성 (LLM 타임아웃 방지)
                     full_description = f"{project_description}\n\n{spec_content}"
-                    generated_code = self.coder.generate_code(project_name, full_description)
-
-                    files = self.coder.parse_generated_code(generated_code, project_name)
+                    files = self.coder.generate_code_from_template(project_name, full_description)
                     project_dir = self.coder.save_code_to_files(project_name, files, str(self.projects_dir))
+                    logger.info(f"✅ Template-based code generation complete: {len(files)} files")
                 except Exception as e:
                     logger.error(f"Generation failed: {e}")
                     if pipeline_attempt == self.MAX_PIPELINE_RETRIES:
@@ -179,8 +181,15 @@ STDERR (last 500 chars):
                         return None
                     continue  # 재시도
 
-                # 3. Self-Correction Loop (최대 10회)
-                logger.info("Step 3: Self-Correction Loop")
+                # 3. AST 기반 Import 자동 수정 (v2.0)
+                logger.info("Step 3: AST-based Import Fix")
+                from tester import auto_fix_imports
+                fixed_count = auto_fix_imports(project_dir)
+                if fixed_count > 0:
+                    logger.info(f"✅ Fixed {fixed_count} test file(s) imports")
+                
+                # 4. Self-Correction Loop (최대 10회)
+                logger.info("Step 4: Self-Correction Loop")
                 success, test_result, attempt = self.tester.test_and_fix(
                     project_dir=project_dir,
                     project_name=project_name
@@ -189,7 +198,7 @@ STDERR (last 500 chars):
                 if not success:
                     logger.error(f"Testing failed after {attempt} attempts.")
                     if pipeline_attempt == self.MAX_PIPELINE_RETRIES:
-                        # 마지막 시에서도 실패하면 리포트 생성
+                        # 마지막 시도에서도 실패하면 리포트 생성
                         self._generate_failure_report(selected_project, test_result)
                         self.planner.update_project_status(selected_project.id, "Failed")
                         return None
@@ -197,8 +206,8 @@ STDERR (last 500 chars):
                     logger.warning(f"🔄 Will retry entire pipeline ({pipeline_attempt}/{self.MAX_PIPELINE_RETRIES})")
                     continue
 
-                # 4. GitOps (서브모듈로 생성)
-                logger.info("Step 4: GitOps (Creating as Submodule with AGPL-3.0)")
+                # 5. GitOps (서브모듈로 생성)
+                logger.info("Step 5: GitOps (Creating as Submodule with AGPL-3.0)")
                 repo_name = project_name.lower().replace(' ', '-').replace('_', '-')
 
                 # 서브모듈로 생성 (GitHub 저장소 생성 + AGPL-3.0 라이선스 추가 + Push + 메인 리포지토리에 서브모듈 추가)

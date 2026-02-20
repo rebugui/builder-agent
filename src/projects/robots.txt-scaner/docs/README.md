@@ -1,132 +1,185 @@
-# Robots.txt Scanner
+# robots.txt scaner
 
-A high-performance, asynchronous command-line tool designed to audit `robots.txt` files for a large volume of target domains. It efficiently fetches, parses, and analyzes robots.txt files, exporting detailed results in JSON format.
+다량을 url을 수집하고 robots.txt scan 후 json 형식으로 결과 출력
 
-## Features
+# Technical Specification: Robots.txt Scanner
 
-- **High Throughput:** Uses asynchronous I/O (`asyncio`, `aiohttp`) to process thousands of URLs concurrently.
-- **Smart Caching:** Built-in SQLite caching to avoid re-scanning domains within 24 hours.
-- **Standard Compliance:** Parses rules according to Robots Exclusion Protocol (REP).
-- **Detailed Reporting:** Provides JSON output including HTTP status, parsed rules (Allow/Disallow), and Sitemap URLs.
-- **Resilient:** Handles network timeouts and redirects gracefully.
+## 1. Project Overview
 
-## Installation
+**Project Name:** robots.txt Scanner
+**Version:** 1.0.0
+**Description:** A high-performance command-line tool designed to collect large volumes of URLs, fetch their corresponding `robots.txt` files, parse the directives (Allow, Disallow, Sitemaps, etc.), and output the aggregated results in a structured JSON format.
 
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd robots-txt-scanner
-   ```
+**Key Objectives:**
+*   **Batch Processing:** Capable of processing thousands of URLs efficiently using asynchronous I/O.
+*   **Structured Output:** Provides clean, parsable JSON data for integration with other security or SEO tools.
+*   **Resilience:** Handles network errors, timeouts, and invalid URLs gracefully without crashing.
 
-2. **Install Dependencies**
-   Create a virtual environment (recommended) and install required packages:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows use `venv\Scripts\activate`
-   pip install -r requirements.txt
-   ```
+## 2. User Stories / Requirements
 
-## Usage
+### Functional Requirements
+1.  **URL Input:**
+    *   As a user, I want to provide a list of URLs via a text file (one URL per line).
+    *   As a user, I want to pass a single URL directly via the command line argument.
+2.  **Fetching & Parsing:**
+    *   The system shall perform an HTTP GET request to `{URL}/robots.txt`.
+    *   The system must parse the raw text of `robots.txt` into distinct fields (User-agent, Disallow, Allow, Crawl-delay, Sitemap).
+    *   The system must handle various character encodings (UTF-8, ASCII, Latin-1).
+3.  **Output:**
+    *   As a user, I want the results saved to a specified JSON file.
+    *   The JSON structure must include the requested URL, the status code of the request, and the parsed directives.
 
-### Basic Syntax
+### Non-Functional Requirements
+1.  **Performance:** The scanner must use asynchronous concurrency to handle large lists (e.g., 100+ concurrent requests) to minimize execution time.
+2.  **User-Agent:** The tool should identify itself with a specific User-Agent string (configurable).
+3.  **Timeouts:** Requests must time out after a configurable period (default: 10 seconds) to prevent hanging.
 
-```bash
-python -m src.main [OPTIONS] INPUT_SOURCE
+## 3. Architecture & Tech Stack
+
+### Tech Stack
+*   **Language:** Python 3.9+
+*   **HTTP Client:** `aiohttp` (for asynchronous HTTP requests)
+*   **Concurrency:** `asyncio`
+*   **CLI Framework:** `argparse` (standard library) or `click`
+*   **URL Parsing:** `urllib.parse`
+
+### High-Level Architecture
+The application follows a **Producer-Consumer** pattern managed by an Async Event Loop.
+
+1.  **Input Reader:** Reads the text file and queues URLs.
+2.  **Async Worker Pool:** A set of coroutines that dequeue URLs and fetch data.
+3.  **Parser:** Parses the text response from `robots.txt`.
+4.  **Aggregator:** Collects results into a list.
+5.  **Exporter:** Writes the final list to a JSON file.
+
+```mermaid
+graph TD
+    A[Input File/CLI Arg] --> B[URL Queue]
+    B --> C{Async Worker Pool}
+    C -->|HTTP GET| D[Target Server]
+    D --> E[Response Handler]
+    E --> F[Parser]
+    F --> G[JSON Aggregator]
+    G --> H[Output File]
 ```
 
-### Arguments
+## 4. API Design / CLI Commands
 
-- `INPUT_SOURCE`: Path to a text file containing URLs (one per line) or `-` to read from stdin.
+### CLI Interface
 
-### Options
+**Command:**
+```bash
+python main.py scan [OPTIONS]
+```
 
-| Option | Short | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--output` | `-o` | `results.json` | Path to the output JSON file. |
-| `--concurrency` | `-c` | `50` | Number of concurrent async requests. |
-| `--timeout` | `-t` | `10` | Request timeout in seconds. |
-| `--user-agent` | | `RobotsTxtScanner/1.0` | Custom User-Agent string. |
-| `--verbose` | `-v` | `False` | Enable verbose logging. |
+**Arguments:**
 
-### Examples
+| Argument | Short | Type | Required | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `--input` | `-i` | String (Path) | Yes (unless `-u` used) | Path to the text file containing target URLs. |
+| `--url` | `-u` | String | No | Single target URL to scan. |
+| `--output` | `-o` | String | No | Path to save the output JSON. Default: `results.json`. |
+| `--workers` | `-w` | Integer | No | Number of concurrent workers. Default: `50`. |
+| `--timeout` | `-t` | Integer | No | Request timeout in seconds. Default: `10`. |
 
-1. **Scan URLs from a file**
-   ```bash
-   python -m src.main input/urls.txt --output report.json --concurrency 100
-   ```
+**Usage Examples:**
 
-2. **Scan URLs via stdin (pipe)**
-   ```bash
-   cat input/urls.txt | python -m src.main - -output report.json
-   ```
+1.  **Scan a list of URLs:**
+    ```bash
+    python main.py scan -i targets.txt -o report.json
+    ```
+2.  **Scan a single URL with high concurrency:**
+    ```bash
+    python main.py scan -u https://example.com -w 100
+    ```
 
-3. **Custom User-Agent and Timeout**
-   ```bash
-   python -m src.main urls.txt --user-agent "MyBot/2.0" --timeout 15
-   ```
+## 5. Data Model / JSON Output Schema
 
-## Output Format
+This section defines the structure of the `results.json` file.
 
-The tool generates a JSON file containing an array of result objects.
-
+**Root Object:**
 ```json
-[
-  {
-    "target_url": "https://example.com/some/page",
-    "robots_url": "https://example.com/robots.txt",
-    "status_code": 200,
-    "content_length": 1024,
-    "crawl_delay": null,
-    "sitemap_urls": [
+{
+  "meta": {
+    "scan_date": "2023-10-27T14:30:00Z",
+    "total_urls_scanned": 100,
+    "successful": 95,
+    "failed": 5
+  },
+  "results": [
+    { ... }
+  ]
+}
+```
+
+**Result Item Object:**
+```json
+{
+  "target_url": "https://example.com",
+  "robots_url": "https://example.com/robots.txt",
+  "status_code": 200,
+  "content_length": 1234,
+  "directives": {
+    "sitemaps": [
       "https://example.com/sitemap.xml"
     ],
-    "rules": [
-      {
-        "user_agent": "*",
-        "allow": ["/", "/public"],
-        "disallow": ["/admin", "/private"]
+    "user_agents": {
+      "*": {
+        "disallow": ["/admin/", "/login"],
+        "allow": ["/public/"],
+        "crawl_delay": null
+      },
+      "Googlebot": {
+        "disallow": ["/private/"],
+        "allow": [],
+        "crawl_delay": 1
       }
-    ],
-    "raw_content": "User-agent: * ...\n...",
-    "error": null
+    }
   },
-  {
-    "target_url": "https://missing-site.com",
-    "robots_url": "https://missing-site.com/robots.txt",
-    "status_code": 404,
-    "error": "Not Found",
-    "rules": [],
-    "sitemap_urls": []
-  }
-]
+  "raw_content": "User-agent: *\nDisallow: /admin/"
+}
 ```
 
-## Running Tests
+*Note: If the `robots.txt` file does not exist (404), `status_code` will be 404 and `directives` will be null.*
 
-To run the unit tests, ensure `pytest` is installed:
+## 6. Directory Structure
 
-```bash
-pip install pytest
-pytest tests/
-```
-
-## Project Structure
-
-```
+```text
 robots-txt-scanner/
+├── README.md
+├── requirements.txt       # Dependencies: aiohttp
+├── setup.py               # Packaging configuration
+├── main.py                # Entry point for CLI
 ├── src/
 │   ├── __init__.py
-│   ├── main.py              # CLI entry point
-│   └── scanner.py          # Core logic (Fetcher, Parser, Cache)
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── fetcher.py     # Handles async HTTP requests
+│   │   ├── parser.py      # Logic to parse robots.txt text
+│   │   └── utils.py       # URL validation helpers
+│   └── cli/
+│       ├── __init__.py
+│       └── commands.py    # Argparse/Cli logic
 ├── tests/
-│   └── test_main.py         # Unit tests
-├── docs/
-│   └── README.md            # This file
-├── requirements.txt          # Python dependencies
-└── input/
-    └── urls.txt             # Example input file
+│   ├── __init__.py
+│   ├── test_fetcher.py
+│   └── test_parser.py
+└── output/                # Default directory for generated JSON files
+    └── .gitkeep
 ```
 
-## License
+## 설치
 
-MIT License
+```bash
+pip install -r requirements.txt
+```
+
+## 사용법
+
+```bash
+python -m src.main --help
+```
+
+## 라이선스
+
+AGPL-3.0

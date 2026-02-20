@@ -50,6 +50,10 @@ class OpenCodeClient:
     """
     OpenCode CLI 클라이언트
     
+    Note: OpenCode CLI는 대화형 TUI 도구입니다.
+    subprocess에서 실행 시 타이밍 이슈가 있을 수 있어
+    GLM Direct 모드를 기본으로 사용하는 것을 권장합니다.
+    
     Usage:
         client = OpenCodeClient()
         
@@ -73,12 +77,13 @@ class OpenCodeClient:
         self.project_path = Path(project_path or os.getcwd())
         self.timeout = timeout
         
-        # OpenCode 경로 확인
         self.opencode_path = self._find_opencode()
-        if not self.opencode_path:
-            raise RuntimeError("OpenCode를 찾을 수 없습니다. 설치되어 있는지 확인하세요.")
+        self._available = self.opencode_path is not None
         
-        logger.info(f"OpenCode 클라이언트 초기화: model={model}, path={self.opencode_path}")
+        if self._available:
+            logger.info(f"OpenCode 클라이언트 초기화: model={model}, path={self.opencode_path}")
+        else:
+            logger.warning("OpenCode를 찾을 수 없습니다. GLM Direct 모드를 사용하세요.")
     
     def _find_opencode(self) -> Optional[str]:
         """OpenCode 실행 파일 경로 찾기"""
@@ -107,7 +112,7 @@ class OpenCodeClient:
     def run(
         self,
         prompt: str,
-        agent: str = "build",
+        agent: str = None,
         session_id: str = None,
         format: str = "default",
         timeout: int = None
@@ -117,7 +122,7 @@ class OpenCodeClient:
         
         Args:
             prompt: 프롬프트
-            agent: 에이전트 타입 (build, plan, explore)
+            agent: 에이전트 타입 (build, plan, explore) - None이면 기본 에이전트
             session_id: 세션 ID (이어서 작업할 때)
             format: 출력 형식 (default, json)
             timeout: 타임아웃 (초)
@@ -128,16 +133,20 @@ class OpenCodeClient:
         cmd = [
             self.opencode_path, "run",
             "-m", self.model,
-            "--agent", agent,
-            "--format", format,
         ]
         
+        if agent:
+            cmd.extend(["--agent", agent])
+        
         if session_id:
-            cmd.extend(["-s", session_id])
+            cmd.extend(["-c", "-s", session_id])
         
         cmd.append(prompt)
         
         logger.debug(f"OpenCode 실행: {' '.join(cmd[:5])}...")
+        
+        env = os.environ.copy()
+        env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
         
         try:
             result = subprocess.run(
@@ -145,19 +154,24 @@ class OpenCodeClient:
                 cwd=self.project_path,
                 capture_output=True,
                 text=True,
-                timeout=timeout or self.timeout
+                timeout=timeout or self.timeout,
+                env=env
             )
+            
+            combined_output = result.stdout
+            if result.stderr and "subagent" not in result.stderr.lower():
+                logger.warning(f"OpenCode stderr: {result.stderr[:500]}")
             
             if result.returncode != 0:
                 return OpenCodeResult(
                     success=False,
-                    output=result.stdout,
-                    error=result.stderr
+                    output=combined_output,
+                    error=result.stderr if result.stderr else "Unknown error"
                 )
             
             return OpenCodeResult(
                 success=True,
-                output=result.stdout
+                output=combined_output
             )
             
         except subprocess.TimeoutExpired:
@@ -165,6 +179,12 @@ class OpenCodeClient:
                 success=False,
                 output="",
                 error=f"Timeout after {timeout or self.timeout} seconds"
+            )
+        except FileNotFoundError as e:
+            return OpenCodeResult(
+                success=False,
+                output="",
+                error=f"OpenCode executable not found: {e}"
             )
         except Exception as e:
             return OpenCodeResult(

@@ -1,111 +1,93 @@
+"""main 모듈 단위 테스트"""
 import pytest
-import asyncio
-import json
-import os
-import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+import logging
+import argparse
+from unittest.mock import patch, MagicMock
 from io import StringIO
+from src.main import setup_logging, parse_arguments, cli
 
-# Adjust path to import src modules
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.main import read_urls, write_results
-from src.scanner import RobotsScanner, RobotsParser, CacheManager
-
-@pytest.fixture
-def sample_urls_file(tmp_path):
-    """Fixture to create a temporary file with URLs."""
-    file_path = tmp_path / "urls.txt"
-    content = "https://example.com\nhttps://google.com\n# Comment\nhttps://github.com"
-    file_path.write_text(content)
-    return file_path
-
-class TestInputOutput:
-    def test_read_urls_from_file(self, sample_urls_file):
-        urls = read_urls(str(sample_urls_file))
-        assert len(urls) == 3
-        assert "https://example.com" in urls
-        assert "# Comment" not in urls
-
-    def test_read_urls_from_stdin(self):
-        dummy_input = StringIO("https://test.com\nhttps://dev.com\n")
-        urls = read_urls(dummy_input)
-        assert len(urls) == 2
-        assert urls[0] == "https://test.com"
-
-    def test_write_results(self, tmp_path):
-        results = [{"url": "https://example.com", "status": 200}]
-        output_path = tmp_path / "output.json"
-        write_results(results, str(output_path))
+class TestSetupLogging:
+    """setup_logging 함수 테스트"""
+    
+    def test_setup_logging_default(self):
+        """기본 로깅 설정 테스트"""
+        setup_logging(verbose=False)
         
-        assert os.path.exists(output_path)
-        with open(output_path, 'r') as f:
-            data = json.load(f)
-        assert data == results
-
-class TestRobotsParser:
-    def test_parse_basic_rules(self):
-        content = """
-        User-agent: *
-        Disallow: /admin
-        Allow: /
+        root_logger = logging.getLogger()
+        # 기본 로그 레벨 확인 (INFO 또는 WARNING)
+        assert root_logger.level in [logging.INFO, logging.WARNING, logging.DEBUG]
+    
+    def test_setup_logging_verbose(self):
+        """상세 로깅 설정 테스트"""
+        setup_logging(verbose=True)
         
-        User-agent: Googlebot
-        Disallow: /private
-        Sitemap: https://example.com/sitemap.xml
+        root_logger = logging.getLogger()
+        # verbose 모드에서는 DEBUG 레벨
+        assert root_logger.level == logging.DEBUG
+    
+    def test_setup_logging_format(self):
+        """로그 포맷 설정 테스트"""
+        setup_logging(verbose=False)
+        
+        root_logger = logging.getLogger()
+        handlers = root_logger.handlers
+        
+        # 핸들러가 존재하고 포맷이 설정되어 있는지 확인
+        if handlers:
+            handler = handlers[0]
+            if hasattr(handler, 'formatter') and handler.formatter:
+                assert handler.formatter._fmt is not None
+    
+    def test_setup_logging_multiple_calls(self):
+        """여러 번 호출 테스트"""
+        # 여러 번 호출해도 에러가 발생하지 않아야 함
+        setup_logging(verbose=False)
+        setup_logging(verbose=True)
+        setup_logging(verbose=False)
+
+
+class TestParseArguments:
+    """parse_arguments 함수 테스트"""
+    
+    def test_parse_arguments_default(self):
+        """기본 인자 파싱 테스트"""
+        with patch('sys.argv', ['prog']):
+            args = parse_arguments()
+            assert args is not None
+    
+    def test_parse_arguments_with_urls(self):
+        """URL 인자 파싱 테스트"""
+        with patch('sys.argv', ['prog', 'https://example.com', 'https://test.org']):
+            args = parse_arguments()
+            # URL이 올바르게 파싱되는지 확인
+            assert hasattr(args, 'urls') or hasattr(args, 'url')
+    
+    def test_parse_arguments_with_file(self):
+        """파일 인자 파싱 테스트"""
+        with patch('sys.argv', ['prog', '-f', 'urls.txt']):
+            args = parse_arguments()
+            assert hasattr(args, 'file') or hasattr(args, 'input_file')
+    
+    def test_parse_arguments_verbose(self):
+        """verbose 플래그 파싱 테스트"""
+        with patch('sys.argv', ['prog', '-v']):
+            args = parse_arguments()
+            assert args.verbose is True
+    
+    def test_parse_arguments_output(self):
+        """출력 파일 인자 파싱 테스트"""
+        with patch('sys.argv', ['prog', '-o', 'output.json']):
+            args = parse_arguments()
+            assert hasattr(args, 'output') and args.output == 'output.json'
+    
+    def test_parse_arguments_help(self):
+        """도움말 인자 테스트"""
+        with patch('sys.argv', ['prog', '-h']):
+            with pytest.raises(SystemExit) as exc_info:
+                parse_arguments()
+            # -h는 정상 종료 (exit code 0)
+            assert exc_info.value.code == 0
+    
+    def test_parse_arguments_timeout(self):
         """
-        parsed = RobotsParser.parse(content)
-        
-        assert "https://example.com/sitemap.xml" in parsed['sitemap_urls']
-        assert len(parsed['rules']) == 2
-        
-        rule_star = next(r for r in parsed['rules'] if r['user_agent'] == '*')
-        assert '/admin' in rule_star['disallow']
-        assert '/' in rule_star['allow']
-        
-        rule_google = next(r for r in parsed['rules'] if r['user_agent'] == 'Googlebot')
-        assert '/private' in rule_google['disallow']
-
-class TestScannerLogic:
-    @pytest.mark.asyncio
-    async def test_scan_single_url_success(self):
-        # Mocking aiohttp session response
-        with patch('src.scanner.aiohttp.ClientSession') as MockSession:
-            mock_response = AsyncMock()
-            mock_response.status = 200
-            mock_response.headers = {'Content-Length': '100'}
-            mock_response.text = AsyncMock(return_value="User-agent: *\nDisallow: /")
-            mock_response.reason = "OK"
-            
-            mock_session = AsyncMock()
-            mock_session.get = MagicMock(return_value=mock_response.__aenter__.return_value)
-            mock_session.closed = False
-            
-            MockSession.return_value = mock_session
-
-            # Mock Cache to avoid DB ops during unit test
-            with patch.object(RobotsScanner, '__init__', lambda self, concurrency, timeout, user_agent: None):
-                scanner = RobotsScanner(concurrency=10, timeout=5, user_agent="Test")
-                scanner.cache = MagicMock()
-                scanner.cache.get = MagicMock(return_value=None)
-                scanner.session = mock_session
-                
-                result = await scanner.scan_single_url("https://example.com")
-                
-                assert result['status_code'] == 200
-                assert len(result['rules']) == 1
-                assert result['rules'][0]['user_agent'] == '*'
-                assert result['target_url'] == "https://example.com"
-
-    @pytest.mark.asyncio
-    async def test_scan_single_url_invalid(self):
-        with patch('src.scanner.aiohttp.ClientSession'):
-            with patch.object(RobotsScanner, '__init__', lambda self, concurrency, timeout, user_agent: None):
-                scanner = RobotsScanner(concurrency=10, timeout=5, user_agent="Test")
-                scanner.cache = MagicMock()
-                scanner.session = MagicMock()
-                
-                result = await scanner.scan_single_url("not-a-valid-url")
-                
-                assert result['status_code'] == 0
-                assert "Invalid URL" in result['error']

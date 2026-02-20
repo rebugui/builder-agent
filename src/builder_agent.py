@@ -17,7 +17,14 @@ from enum import Enum
 # Intelligence Agent GLM Client 재사용
 # 상대 경로로 임포트 (같은 프로젝트 내)
 try:
-    from modules.intelligence.writer import GLMClient
+    from modules.intelligence.llm_client import GLMClient
+except ImportError:
+    # 프로젝트 루트가 달라지지 않을 경우 처리
+    # 이 경우는 Builder Agent를 별도로 실행하는 것이므로,
+    # 현재 디렉토리 기준으로 임포트를 시도합니다.
+    import sys
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from modules.intelligence.llm_client import GLMClient
 except ImportError:
     # 프로젝트 루트가 달라지 않을 경우 처리
     # 이 경우는 Builder Agent를 별도로 실행하는 것이므로,
@@ -84,7 +91,7 @@ def validate_output_path(base_dir: str, project_name: str) -> str:
     
     return str(target_path)
 GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4/")
-GLM_MODEL = os.getenv("GLM_MODEL", "glm-4.7")
+GLM_MODEL = os.getenv("GLM_MODEL", "glm-5")
 
 
 class BuilderAgent:
@@ -97,7 +104,7 @@ class BuilderAgent:
         Args:
             api_key: GLM API Key (None이면 환경변수에서 자동 로드)
             base_url: GLM API Base URL
-            model: 사용할 모델 (기본: glm-4.7)
+            model: 사용할 모델 (기본: glm-5)
         """
         if api_key is None:
             api_key = GLM_API_KEY
@@ -237,7 +244,7 @@ def scan_web_directory(target_url):
     except subprocess.TimeoutExpired:
         return "Timeout"
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {{str(e)}}"
 
 if __name__ == "__main__":
     target = "example.com"
@@ -359,7 +366,7 @@ def scan_web_directory(target_url):
     except subprocess.TimeoutExpired:
         return "Timeout"
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {{str(e)}}"
 
 if __name__ == "__main__":
     target = "example.com"
@@ -392,12 +399,15 @@ if __name__ == "__main__":
 """
 
         # GLM 호출 (Intelligence Agent GLM Client 재사용)
-        generated_code = self.client.chat(
-            system_prompt=self.system_prompt,
-            user_prompt=user_prompt
-        )
-
-        return generated_code
+        try:
+            generated_code = self.client.chat(
+                system_prompt=self.system_prompt,
+                user_prompt=user_prompt
+            )
+            return generated_code
+        except Exception as e:
+            print(f"❌ GLM API 호출 실패: {str(e)}")
+            return f"Error: {{str(e)}}"
 
     def parse_generated_code(self, generated_code: str, tool_name: str) -> dict:
         """
@@ -547,7 +557,7 @@ MIT License
 
     def save_code_to_files(self, tool_name: str, files: dict, output_dir: str):
         """
-        코드를 파일로 저장 (경로 순회 공격 방지)
+        코드를 파일로 저장 (경로 순회 공격 방지 + 파일명 길이 제한)
 
         Args:
             tool_name: 도구 이름
@@ -558,6 +568,11 @@ MIT License
             ValueError: 유효하지 않은 경로인 경우
         """
         tool_name_kebab = sanitize_project_name(tool_name)
+        
+        # 프로젝트명 길이 제한 (최대 50자)
+        if len(tool_name_kebab) > 50:
+            tool_name_kebab = tool_name_kebab[:50]
+        
         project_dir = validate_output_path(output_dir, tool_name)
         
         project_path = Path(project_dir).resolve()
@@ -571,11 +586,37 @@ MIT License
         os.makedirs(os.path.join(project_dir, 'docs'), exist_ok=True)
 
         for filename, content in files.items():
+            # 파일명 정규화 (길이 제한 포함)
             safe_filename = sanitize_project_name(filename.replace('.py', '')) + '.py'
+            
+            # 파일명 길이 제한 (macOS: 255자, 안전하게 200자)
+            if len(safe_filename) > 200:
+                # 해시값으로 대체
+                import hashlib
+                hash_val = hashlib.md5(filename.encode()).hexdigest()[:8]
+                safe_filename = f"code_{hash_val}.py"
+            
             filepath = os.path.join(project_dir, safe_filename)
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(content)
-            print(f"  → Created: {safe_filename}")
+            
+            # 전체 경로 길이 검증
+            if len(filepath) > 900:
+                # 기본 위치로 강제 변경
+                safe_filename = f"src/code_{hash(safe_filename) % 10000}.py"
+                filepath = os.path.join(project_dir, safe_filename)
+            
+            try:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                print(f"  → Created: {safe_filename}")
+            except OSError as e:
+                print(f"  ⚠️  Failed to create {safe_filename}: {e}")
+                # 실패 시 기본 위치에 저장
+                import hashlib
+                hash_val = hashlib.md5(filename.encode()).hexdigest()[:8]
+                fallback = os.path.join(project_dir, 'src', f"code_{hash_val}.py")
+                with open(fallback, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                print(f"  → Created (fallback): src/code_{hash_val}.py")
 
         readme_content = self.create_readme(tool_name, f"{tool_name} DevOps 도구")
         readme_path = os.path.join(project_dir, 'README.md')

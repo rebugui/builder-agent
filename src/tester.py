@@ -33,6 +33,166 @@ except ImportError:
 logger = setup_logger("SelfCorrectionTester")
 
 
+# ============================================
+# v2.0: AST 기반 Import 경로 수정
+# ============================================
+
+def analyze_project_structure(project_dir: str) -> Dict[str, List[str]]:
+    """
+    프로젝트 구조 분석 - 실제 존재하는 모듈/함수 파악
+    
+    Args:
+        project_dir: 프로젝트 디렉토리
+        
+    Returns:
+        {모듈경로: [함수명, 클래스명, ...]}
+    """
+    import ast
+    
+    project_path = Path(project_dir)
+    structure = {}
+    
+    # src/ 디렉토리 스캔
+    src_path = project_path / "src"
+    if not src_path.exists():
+        return structure
+    
+    for py_file in src_path.rglob("*.py"):
+        if py_file.name == "__init__.py":
+            continue
+        
+        # 모듈 경로 계산
+        rel_path = py_file.relative_to(project_path)
+        module_path = str(rel_path.with_suffix("")).replace("/", ".")
+        
+        try:
+            with open(py_file, 'r', encoding='utf-8') as f:
+                tree = ast.parse(f.read())
+        except:
+            continue
+        
+        exports = []
+        
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                if not node.name.startswith('_'):
+                    exports.append(node.name)
+            elif isinstance(node, ast.ClassDef):
+                exports.append(node.name)
+        
+        structure[module_path] = exports
+    
+    return structure
+
+
+def fix_import_statements(test_file: str, project_structure: Dict[str, List[str]]) -> Tuple[str, bool]:
+    """
+    테스트 파일의 import 문을 실제 구조에 맞게 수정
+    
+    Args:
+        test_file: 테스트 파일 경로
+        project_structure: 프로젝트 구조 (analyze_project_structure 결과)
+        
+    Returns:
+        (수정된 내용, 수정 여부)
+    """
+    import ast
+    
+    try:
+        with open(test_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+            original_content = content
+    except:
+        return content, False
+    
+    # import 문 분석
+    lines = content.split('\n')
+    new_lines = []
+    modified = False
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # from ... import ... 패턴
+        if stripped.startswith('from ') and ' import ' in stripped:
+            match = re.match(r'from\s+([\w.]+)\s+import\s+(.+)', stripped)
+            if match:
+                module = match.group(1)
+                imports = [i.strip() for i in match.group(2).split(',')]
+                
+                # 실제 모듈에서 찾기
+                valid_imports = []
+                for imp in imports:
+                    found = False
+                    for actual_module, exports in project_structure.items():
+                        if imp in exports:
+                            if actual_module != module:
+                                # 다른 모듈에 있음
+                                new_line = f"from {actual_module} import {imp}"
+                                if not modified:
+                                    modified = True
+                                new_lines.append(new_line)
+                                found = True
+                                break
+                    if not found:
+                        valid_imports.append(imp)
+                
+                if valid_imports:
+                    new_line = f"from {module} import {', '.join(valid_imports)}"
+                    new_lines.append(new_line)
+                continue
+        
+        new_lines.append(line)
+    
+    new_content = '\n'.join(new_lines)
+    return new_content, modified
+
+
+def auto_fix_imports(project_dir: str) -> int:
+    """
+    프로젝트의 모든 테스트 파일 import 자동 수정
+    
+    Args:
+        project_dir: 프로젝트 디렉토리
+        
+    Returns:
+        수정된 파일 수
+    """
+    project_path = Path(project_dir)
+    
+    # 프로젝트 구조 분석
+    structure = analyze_project_structure(project_dir)
+    
+    if not structure:
+        logger.warning("프로젝트 구조 분석 실패")
+        return 0
+    
+    logger.info(f"프로젝트 구조 분석 완료: {len(structure)}개 모듈")
+    
+    # 테스트 파일 스캔
+    tests_path = project_path / "tests"
+    if not tests_path.exists():
+        return 0
+    
+    fixed_count = 0
+    
+    for test_file in tests_path.glob("test_*.py"):
+        new_content, modified = fix_import_statements(str(test_file), structure)
+        
+        if modified:
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            logger.info(f"Import 수정: {test_file.name}")
+            fixed_count += 1
+    
+    return fixed_count
+
+
+# ============================================
+# 기존 클래스
+# ============================================
+
+
 @dataclass
 class TestResult:
     passed: bool
