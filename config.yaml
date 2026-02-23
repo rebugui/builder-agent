@@ -1,0 +1,65 @@
+# Builder Agent v3 - Configuration
+
+# ChatDev 2.0 Settings
+chatdev:
+  url: http://localhost:6400
+  timeout: 600  # 10 minutes
+  default_workflow: ChatDev_GLM5.yaml
+
+# GLM API Settings
+glm:
+  base_url: https://api.z.ai/api/coding/paas/v4
+  api_key: ${API_KEY}
+  model: glm-5
+  temperature: 0.7
+  max_tokens: 4000
+
+# GitHub Settings
+github:
+  token: ${GITHUB_TOKEN}
+  username: rebugui
+  auto_init: false
+  private: false
+
+# Topic Discovery Settings
+discovery:
+  sources:
+    - github_trending
+    - security_news
+    - hacker_news
+    - predefined
+  limit: 5
+  cache_file: logs/discovered_ideas.json
+
+# Scheduling
+schedule:
+  daily:
+    hour: 9
+    minute: 0
+    timezone: Asia/Seoul
+  weekday:
+    enabled: true
+    hour: 10
+    minute: 0
+    timezone: Asia/Seoul
+
+# Publishing
+publishing:
+  enable_ci: true
+  enable_readme: true
+  enable_requirements: true
+  enable_gitignore: true
+
+# Notifications
+notifications:
+  telegram:
+    enabled: false
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+
+# Logging
+logging:
+  level: INFO
+  file: logs/builder_agent.log
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
