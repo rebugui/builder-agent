@@ -264,12 +264,27 @@ class BuilderAgentV3:
                     "projects_created": 0
                 }
             
-            # 활성 세션 확인
+            # 1. 활성 세션 확인
             active_sessions = self.scheduler.chatdev_client.get_active_sessions()
-            print(f"📊 현재 활성 세션: {active_sessions}개")
+            print(f"📊 활성 ChatDev 세션: {active_sessions}개")
             
+            # 2. Notion "개발중" 상태 확인
+            in_progress = self.scheduler.notion.get_in_progress_items()
+            print(f"📊 Notion 개발중 상태: {len(in_progress)}개")
+            
+            # 3. 고아 상태 정리 (개발중인데 세션 없음)
+            if len(in_progress) > active_sessions:
+                print(f"\n🧹 고아 상태 정리 시작...")
+                cleaned = self.scheduler.notion.sync_stale_in_progress(active_sessions)
+                if cleaned:
+                    print(f"   정리된 항목: {len(cleaned)}개")
+                    # 정리 후 다시 확인
+                    active_sessions = self.scheduler.chatdev_client.get_active_sessions()
+                    in_progress = self.scheduler.notion.get_in_progress_items()
+            
+            # 4. 세션 대기 또는 바로 실행
             if active_sessions > 0:
-                print(f"⏳ 활성 세션이 {active_sessions}개 있습니다. 완료될 때까지 대기...")
+                print(f"\n⏳ 활성 세션 {active_sessions}개 대기 중...")
                 
                 # 최대 10분 대기
                 if not self.scheduler.chatdev_client.wait_for_available_slot(max_wait=600, check_interval=30):
@@ -284,7 +299,7 @@ class BuilderAgentV3:
                 
                 print(f"✅ 슬롯 확보, 개발 시작")
             
-            # 개발 실행
+            # 5. 개발 실행
             self.scheduler.run_development_from_notion()
             
             return {
@@ -310,11 +325,15 @@ class BuilderAgentV3:
     def health_check(self) -> dict:
         """상태 확인"""
         active_sessions = self.scheduler.chatdev_client.get_active_sessions()
+        in_progress = self.scheduler.notion.get_in_progress_items()
+        
         return {
             "chatdev": self.scheduler.chatdev_client.health_check(),
             "github": self.scheduler.publisher.github_token is not None,
             "notion": self.scheduler.notion.token is not None,
-            "active_sessions": active_sessions
+            "active_sessions": active_sessions,
+            "notion_in_progress": len(in_progress),
+            "sync_status": "synced" if active_sessions == len(in_progress) else "stale"
         }
 
 

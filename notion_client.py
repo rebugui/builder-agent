@@ -337,6 +337,54 @@ class NotionClient:
         
         return queue
     
+    def get_in_progress_items(self) -> List[Dict]:
+        """Get items currently in development (상태 = 개발중)
+        
+        Returns:
+            List of Notion pages with status '개발중'
+        """
+        data = {
+            "filter": {
+                "property": "상태",
+                "status": {"equals": "개발중"}
+            },
+            "sorts": [
+                {"property": "생성 일시", "direction": "descending"}
+            ],
+            "page_size": 10
+        }
+        
+        result = self._request("POST", f"databases/{self.database_id}/query", data)
+        return result.get("results", [])
+    
+    def sync_stale_in_progress(self, active_sessions: int) -> List[str]:
+        """
+        고아 상태(개발중인데 세션 없음)인 아이템 정리
+        
+        Args:
+            active_sessions: 현재 실행 중인 ChatDev 세션 수
+            
+        Returns:
+            정리된 페이지 ID 목록
+        """
+        cleaned = []
+        
+        in_progress = self.get_in_progress_items()
+        
+        # 개발중인 아이템이 있는데 세션이 없으면 실패로 표시
+        if len(in_progress) > active_sessions:
+            # 세션 수보다 많은 개발중 아이템은 실패로 처리
+            stale_count = len(in_progress) - active_sessions
+            
+            for i, page in enumerate(in_progress[:stale_count]):
+                page_id = page["id"]
+                idea = self.parse_page_to_idea(page)
+                
+                print(f"   🧹 고아 상태 정리: {idea.name} → 개발 실패")
+                self.update_status(page_id, "개발 실패")
+                cleaned.append(page_id)
+        
+        return cleaned
     def update_status(self, page_id: str, status: str, github_url: str = None) -> bool:
         """Update project status
         
