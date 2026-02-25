@@ -266,14 +266,16 @@ JSON만 출력하세요:"""
                     "model": "glm-5",
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7,
-                    "max_tokens": 1500
+                    "max_tokens": 3000
                 },
                 timeout=120
             )
             
             if response.status_code == 200:
                 data = response.json()
-                content = data["choices"][0]["message"]["content"]
+                message = data["choices"][0]["message"]
+                # content 또는 reasoning_content에서 JSON 추출
+                content = message.get("content", "") or message.get("reasoning_content", "")
                 json_str = self._extract_json(content)
                 if json_str:
                     return json.loads(json_str)
@@ -351,14 +353,16 @@ JSON만 출력하세요:"""
                     "model": "glm-5",
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7,
-                    "max_tokens": 2000
+                    "max_tokens": 4000
                 },
                 timeout=120
             )
             
             if response.status_code == 200:
                 data = response.json()
-                content = data["choices"][0]["message"]["content"]
+                message = data["choices"][0]["message"]
+                # content 또는 reasoning_content에서 JSON 추출
+                content = message.get("content", "") or message.get("reasoning_content", "")
                 json_str = self._extract_json(content)
                 if json_str:
                     return json.loads(json_str)
