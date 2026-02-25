@@ -123,11 +123,8 @@ class NotionClient:
             }
         }
         
-        # Add source URL if available
-        if idea.source_url:
-            properties["URL"] = {
-                "url": idea.source_url
-            }
+        # URL 필드는 배포 완료 후 GitHub 저장소 주소용
+        # 아이디어 발굴 시에는 URL을 입력하지 않음
         
         data = {
             "parent": {"database_id": self.database_id},
