@@ -7,6 +7,7 @@ import os
 import sys
 import asyncio
 import argparse
+import yaml
 from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
@@ -17,6 +18,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # .env 파일 로드
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
+
+# config.yaml 로드
+config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+with open(config_path, 'r') as f:
+    config = yaml.safe_load(f)
 
 from discoverer.topic_discoverer import TopicDiscoverer
 from orchestrator.chatdev_client import ChatDevClient
@@ -145,7 +151,7 @@ def start_scheduler():
         print(f"⚠️ Environment issues: {', '.join(issues)}")
         print("   Some features may not work\n")
     
-    scheduler = BuilderScheduler()
+    scheduler = BuilderScheduler(config=config)
     scheduler.start()
 
 
@@ -218,6 +224,76 @@ Examples:
     
     else:
         parser.print_help()
+
+
+class BuilderAgentV3:
+    """
+    Builder Agent v3 - 스케줄러 연동 래퍼 클래스
+    
+    OpenClaw 통합 스케줄러에서 호출하기 위한 인터페이스
+    """
+    
+    def __init__(self, config: dict = None):
+        self.config = config or {}
+        self.scheduler = BuilderScheduler(config=self.config)
+    
+    def run_legacy_pipeline(self) -> dict:
+        """
+        레거시 파이프라인 실행
+        
+        OpenClaw 스케줄러에서 호출하는 진입점.
+        Notion 큐에서 대기 중인 아이디어를 개발하고 GitHub에 게시.
+        
+        Returns:
+            dict: 실행 결과
+        """
+        import asyncio
+        
+        print(f"\n{'='*60}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🏗️ Builder Agent v3 - Legacy Pipeline")
+        print(f"{'='*60}\n")
+        
+        try:
+            # ChatDev 서버 상태 확인
+            if not self.scheduler.chatdev_client.health_check():
+                error_msg = "ChatDev 2.0 server is not running (port 6400)"
+                print(f"❌ {error_msg}")
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "projects_created": 0
+                }
+            
+            # 개발 실행
+            self.scheduler.run_development_from_notion()
+            
+            return {
+                "success": True,
+                "error": None,
+                "projects_created": 1,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Pipeline failed: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            
+            return {
+                "success": False,
+                "error": error_msg,
+                "projects_created": 0,
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    def health_check(self) -> dict:
+        """상태 확인"""
+        return {
+            "chatdev": self.scheduler.chatdev_client.health_check(),
+            "github": self.scheduler.publisher.github_token is not None,
+            "notion": self.scheduler.notion.token is not None
+        }
 
 
 if __name__ == "__main__":
