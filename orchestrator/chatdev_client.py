@@ -52,12 +52,12 @@ class ChatDevClient:
             if not os.path.exists(log_file):
                 return 0
             
-            # 마지막 100줄에서 세션 상태 분석
+            # grep으로 직접 세션 상태 로그 추출 (더 정확함)
             result = subprocess.run(
-                ["tail", "-100", log_file],
+                ["grep", "-E", "status to (running|completed)|Session.*cleaned", log_file],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=10
             )
             
             log_content = result.stdout
