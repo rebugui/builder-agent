@@ -264,6 +264,26 @@ class BuilderAgentV3:
                     "projects_created": 0
                 }
             
+            # 활성 세션 확인
+            active_sessions = self.scheduler.chatdev_client.get_active_sessions()
+            print(f"📊 현재 활성 세션: {active_sessions}개")
+            
+            if active_sessions > 0:
+                print(f"⏳ 활성 세션이 {active_sessions}개 있습니다. 완료될 때까지 대기...")
+                
+                # 최대 10분 대기
+                if not self.scheduler.chatdev_client.wait_for_available_slot(max_wait=600, check_interval=30):
+                    error_msg = f"활성 세션 {active_sessions}개가 여전히 실행 중"
+                    print(f"⚠️ {error_msg}")
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "projects_created": 0,
+                        "active_sessions": active_sessions
+                    }
+                
+                print(f"✅ 슬롯 확보, 개발 시작")
+            
             # 개발 실행
             self.scheduler.run_development_from_notion()
             
@@ -289,10 +309,12 @@ class BuilderAgentV3:
     
     def health_check(self) -> dict:
         """상태 확인"""
+        active_sessions = self.scheduler.chatdev_client.get_active_sessions()
         return {
             "chatdev": self.scheduler.chatdev_client.health_check(),
             "github": self.scheduler.publisher.github_token is not None,
-            "notion": self.scheduler.notion.token is not None
+            "notion": self.scheduler.notion.token is not None,
+            "active_sessions": active_sessions
         }
 
 

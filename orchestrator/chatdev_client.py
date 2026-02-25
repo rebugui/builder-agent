@@ -24,7 +24,7 @@ class ChatDevClient:
         self.base_url = base_url
         self.glm_base_url = os.getenv("BASE_URL", "https://api.z.ai/api/coding/paas/v4")
         self.glm_api_key = os.getenv("API_KEY")
-        self.timeout = 600  # 10 minutes
+        self.timeout = 14400  # 4 hours (long-running development)
     
     def health_check(self) -> bool:
         """서버 상태 확인"""
@@ -34,9 +34,94 @@ class ChatDevClient:
         except:
             return False
     
+    def get_active_sessions(self) -> int:
+        """
+        현재 실행 중인 활성 세션 수 확인
+        
+        Returns:
+            int: 활성 세션 수 (0 이상)
+        """
+        try:
+            # ChatDev 서버의 로그 파일에서 활성 세션 파악
+            # 또는 WebSocket으로 상태 요청
+            import subprocess
+            
+            # 로그 파일에서 running 상태 세션 수 계산
+            log_file = "/Users/nabang/Documents/OpenClaw/logs/chatdev_server.log"
+            
+            if not os.path.exists(log_file):
+                return 0
+            
+            # 마지막 100줄에서 세션 상태 분석
+            result = subprocess.run(
+                ["tail", "-100", log_file],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            log_content = result.stdout
+            
+            # running 세션 수 계산
+            import re
+            
+            # "Updated session xxx status to running" 찾기
+            running_sessions = set()
+            completed_sessions = set()
+            
+            for line in log_content.split('\n'):
+                # running 상태
+                match = re.search(r'Updated session ([a-f0-9-]+) status to running', line)
+                if match:
+                    running_sessions.add(match.group(1))
+                
+                # completed 상태
+                match = re.search(r'Updated session ([a-f0-9-]+) status to completed', line)
+                if match:
+                    completed_sessions.add(match.group(1))
+                
+                # cleaned 상태
+                match = re.search(r'Session ([a-f0-9-]+) cleaned', line)
+                if match:
+                    completed_sessions.add(match.group(1))
+            
+            # 활성 세션 = running - completed
+            active = running_sessions - completed_sessions
+            return len(active)
+            
+        except Exception as e:
+            print(f"   [WARN] 활성 세션 확인 실패: {e}")
+            return 0
+    
+    def wait_for_available_slot(self, max_wait: int = 300, check_interval: int = 30) -> bool:
+        """
+        사용 가능한 슬롯이 생길 때까지 대기
+        
+        Args:
+            max_wait: 최대 대기 시간 (초)
+            check_interval: 확인 간격 (초)
+            
+        Returns:
+            bool: 슬롯 확보 성공 여부
+        """
+        waited = 0
+        
+        while waited < max_wait:
+            active = self.get_active_sessions()
+            
+            if active == 0:
+                return True
+            
+            print(f"   ⏳ 활성 세션 {active}개 대기 중... ({waited}초)")
+            time.sleep(check_interval)
+            waited += check_interval
+        
+        print(f"   ⚠️ 최대 대기 시간 초과 ({max_wait}초)")
+        return False
+    
     async def develop_project(self, idea: ProjectIdea) -> DevelopmentResult:
         """
-        ChatDev 2.0을 사용하여 프로젝트 개발
+        ChatDev 2.0을 사용하여 프로젝트 개발 (WebSocket 방식)
         
         Args:
             idea: 프로젝트 아이디어
@@ -47,17 +132,78 @@ class ChatDevClient:
         start_time = time.time()
         
         try:
-            # 1. 워크플로우 생성
-            workflow = self._create_workflow(idea)
+            # WebSocket으로 직접 ChatDev 서버에 연결
+            import websockets
             
-            # 2. 세션 시작
-            session_id = await self._start_session(workflow, idea)
+            uri = f"{self.base_url.replace('http://', 'ws://')}/ws"
             
-            # 3. 실행 및 모니터링
-            result = await self._monitor_and_collect(session_id, idea)
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=60) as ws:
+                # 1. 연결 대기
+                response = await asyncio.wait_for(ws.recv(), timeout=10)
+                data = json.loads(response)
+                session_id = data.get("data", {}).get("session_id")
+                
+                if not session_id:
+                    raise Exception("Failed to get session ID")
+                
+                # 2. 워크플로우 시작 (상세 스펙 활용)
+                task_prompt = idea.get_detailed_prompt()
+                
+                workflow_request = {
+                    "type": "start_workflow",
+                    "data": {
+                        "yaml_file": "ChatDev_v1.yaml",
+                        "task_prompt": task_prompt,
+                        "log_level": "info"
+                    }
+                }
+                
+                await ws.send(json.dumps(workflow_request))
+                
+                # 3. 실행 모니터링
+                files = []
+                agent_count = 0
+                token_usage = {}
+                
+                while True:
+                    try:
+                        response = await asyncio.wait_for(ws.recv(), timeout=self.timeout)
+                        data = json.loads(response)
+                        msg_type = data.get("type", "unknown")
+                        
+                        if msg_type == "workflow_started":
+                            pass  # 진행 중
+                            
+                        elif msg_type == "agent_message":
+                            agent_count += 1
+                            agent = data.get("data", {}).get("agent", "unknown")
+                            
+                        elif msg_type == "workflow_completed":
+                            results = data.get("data", {}).get("results", {})
+                            code_files = data.get("data", {}).get("code_files", [])
+                            token_usage = data.get("data", {}).get("token_usage", {})
+                            files = code_files
+                            break
+                            
+                        elif msg_type == "workflow_cancelled":
+                            raise Exception("Workflow cancelled")
+                            
+                        elif msg_type == "error":
+                            error_msg = data.get("data", {}).get("message", "Unknown error")
+                            raise Exception(error_msg)
+                            
+                    except asyncio.TimeoutError:
+                        raise Exception("Workflow timeout")
             
-            result.execution_time = time.time() - start_time
-            return result
+            execution_time = time.time() - start_time
+            
+            return DevelopmentResult(
+                idea=idea,
+                success=True,
+                files=files,
+                execution_time=execution_time,
+                token_usage=token_usage
+            )
             
         except Exception as e:
             return DevelopmentResult(
@@ -73,11 +219,12 @@ class ChatDevClient:
         workflow = {
             "version": "0.4.0",
             "vars": {
-                "PROJECT_NAME": idea.name,
-                "PROJECT_DESC": idea.description,
-                "REQUIREMENTS": "\n".join(f"- {req}" for req in idea.requirements),
-                "TECH_STACK": ", ".join(idea.technical_stack),
                 "COMMON_PROMPT": f"""
+You are a helpful AI assistant working at ChatDev.
+Always provide detailed, accurate responses.
+When writing code, ensure it is complete and functional.
+Output in the requested format without extra explanations.
+
 Project: {idea.name}
 Description: {idea.description}
 
@@ -95,16 +242,16 @@ Generate clean, well-documented, production-ready code.
                 "id": f"builder_{idea.name}",
                 "description": f"Development workflow for {idea.name}",
                 "is_majority_voting": False,
-                "start": ["ceo"]
-            },
-            "nodes": self._create_nodes(idea),
-            "edges": [
-                {"from": "ceo", "to": "cto"},
-                {"from": "cto", "to": "programmer"},
-                {"from": "programmer", "to": "reviewer"},
-                {"from": "reviewer", "to": "tester"},
-                {"from": "tester", "to": "cto_final"}
-            ]
+                "start": ["ceo"],
+                "nodes": self._create_nodes(idea),
+                "edges": [
+                    {"from": "ceo", "to": "cto"},
+                    {"from": "cto", "to": "programmer"},
+                    {"from": "programmer", "to": "reviewer"},
+                    {"from": "reviewer", "to": "tester"},
+                    {"from": "tester", "to": "cto_final"}
+                ]
+            }
         }
         
         return workflow
@@ -188,36 +335,58 @@ Generate clean, well-documented, production-ready code.
         
         return nodes
     
+    def _sanitize_filename(self, name: str) -> str:
+        """파일명을 안전하게 변환 (공백, 특수문자 제거)"""
+        import re
+        # 공백과 특수문자를 언더스코어로 변환
+        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+        # 연속된 언더스코어 제거
+        safe_name = re.sub(r'_+', '_', safe_name)
+        # 앞뒤 언더스코어 제거
+        safe_name = safe_name.strip('_').lower()
+        return safe_name or 'project'
+    
     async def _start_session(self, workflow: Dict[str, Any], idea: ProjectIdea) -> str:
         """개발 세션 시작"""
+        # 파일명 안전하게 변환
+        safe_name = self._sanitize_filename(idea.name)
+        
         async with aiohttp.ClientSession() as session:
             # 워크플로우 파일 업로드
             workflow_data = {
-                "name": f"builder_{idea.name}.yaml",
+                "filename": f"builder_{safe_name}.yaml",
                 "content": json.dumps(workflow, indent=2)
             }
             
             async with session.post(
-                f"{self.base_url}/api/workflows/upload",
+                f"{self.base_url}/api/workflows/upload/content",
                 json=workflow_data,
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as response:
                 if response.status != 200:
                     raise Exception(f"Failed to upload workflow: {await response.text()}")
             
-            # 세션 시작
-            session_data = {
-                "workflow": f"builder_{idea.name}.yaml",
-                "task": idea.description
+            # 세션 ID 생성 (타임스탬프 기반)
+            import uuid
+            session_id = f"builder_{safe_name}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+            
+            # 워크플로우 실행
+            execute_data = {
+                "session_id": session_id,
+                "yaml_file": f"builder_{safe_name}.yaml",
+                "task_prompt": idea.description
             }
             
             async with session.post(
-                f"{self.base_url}/api/sessions",
-                json=session_data,
+                f"{self.base_url}/api/workflow/execute",
+                json=execute_data,
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as response:
+                if response.status != 200:
+                    raise Exception(f"Failed to execute workflow: {await response.text()}")
+                
                 result = await response.json()
-                return result["session_id"]
+                return session_id
     
     async def _monitor_and_collect(self, session_id: str, idea: ProjectIdea) -> DevelopmentResult:
         """세션 모니터링 및 결과 수집"""
