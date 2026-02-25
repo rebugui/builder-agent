@@ -45,8 +45,14 @@ class PolaDiscoverer:
             source = sources[i]
             print(f"   분석 중: {source['name'][:50]}...")
             
-            # GLM-5로 상세 스펙 작성
-            spec = self._generate_detailed_spec(source)
+            # GLM-5로 상세 스펙 작성 (재시도 로직)
+            spec = None
+            for attempt in range(2):  # 최대 2회 시도
+                spec = self._generate_detailed_spec(source)
+                if spec:
+                    break
+                if attempt == 0:
+                    print(f"   재시도 중...")
             
             if spec:
                 ideas.append({
@@ -320,21 +326,68 @@ class PolaDiscoverer:
         return None
     
     def _extract_json(self, content: str) -> Optional[str]:
-        """응답에서 JSON 추출"""
+        """응답에서 JSON 추출 (개선된 버전)"""
         import re
+        import json
         
-        # ```json ... ``` 블록 찾기
+        # 1. ```json ... ``` 블록 찾기
         json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
         if json_match:
-            return json_match.group(1)
+            json_str = json_match.group(1).strip()
+            # 유효성 검사
+            try:
+                json.loads(json_str)
+                return json_str
+            except json.JSONDecodeError:
+                pass  # 계속 다른 방법 시도
         
-        # { ... } 블록 찾기
+        # 2. { ... } 블록 찾기 (중첩 중괄호 고려)
         brace_start = content.find('{')
-        brace_end = content.rfind('}')
-        if brace_start != -1 and brace_end != -1:
-            return content[brace_start:brace_end+1]
+        if brace_start != -1:
+            # 중괄호 매칭
+            depth = 0
+            brace_end = -1
+            for i in range(brace_start, len(content)):
+                if content[i] == '{':
+                    depth += 1
+                elif content[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        brace_end = i
+                        break
+            
+            if brace_end != -1:
+                json_str = content[brace_start:brace_end+1]
+                try:
+                    json.loads(json_str)
+                    return json_str
+                except json.JSONDecodeError as e:
+                    # JSON 복구 시도
+                    fixed = self._fix_json(json_str)
+                    if fixed:
+                        try:
+                            json.loads(fixed)
+                            return fixed
+                        except:
+                            pass
         
         return None
+    
+    def _fix_json(self, json_str: str) -> Optional[str]:
+        """손상된 JSON 복구 시도"""
+        import re
+        
+        # 1. 후행 쉼표 제거
+        json_str = re.sub(r',\s*}', '}', json_str)
+        json_str = re.sub(r',\s*]', ']', json_str)
+        
+        # 2. 따옴표 없는 키 수정 (간단한 경우만)
+        # json_str = re.sub(r'(\w+):', r'"\1":', json_str)
+        
+        # 3. 닫히지 않은 문자열 수정 (간단한 경우)
+        # 마지막 " 뒤에 } 나 ] 가 오도록
+        
+        return json_str
     
     def format_spec_for_notion(self, spec: Dict[str, Any]) -> str:
         """상세 스펙을 Notion 본문 형식으로 변환 (개선된 버전)"""
